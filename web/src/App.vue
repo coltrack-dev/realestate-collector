@@ -4,6 +4,7 @@ import FilterBar from './components/FilterBar.vue'
 import ListingCard from './components/ListingCard.vue'
 import ListingMap from './components/ListingMap.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
+import SiteHeader from './components/SiteHeader.vue'
 import { fetchListings, fetchStats } from './api/client'
 import type { Listing, ListingFilters, Stats } from './types'
 import { getValidCoordinates } from './map/coordinates'
@@ -55,18 +56,11 @@ onMounted(() => { void loadListings(); void loadStats() })
 
 <template>
   <div class="app-shell">
-    <header class="topbar">
-      <a class="brand" href="/" aria-label="Atlas Inmobiliario">
-        <span class="brand-mark"><span></span><span></span><span></span></span>
-        <span><strong>atlas</strong><small>inmobiliario</small></span>
-      </a>
-      <div class="topbar-meta"><span class="live-dot"></span><span>Inventario actualizado</span><span class="meta-divider"></span><span>Colombia</span></div>
-      <div class="topbar-actions"><span class="data-pill">{{ totalLabel }} activos</span><button class="icon-button" type="button" aria-label="Menú">☰</button></div>
-    </header>
+    <SiteHeader :total="totalLabel" />
 
     <main class="workspace">
       <aside class="sidebar"><FilterBar @apply="applyFilters" @reset="resetFilters" /><div class="sidebar-note"><span>✦</span><p>Precios y disponibilidad corresponden al último registro de cada fuente.</p></div></aside>
-      <section class="catalog-column">
+      <section id="catalogo" class="catalog-column">
         <div class="catalog-header"><div><span class="eyebrow">Explorar inventario</span><h1>Propiedades que <em>encajan</em> contigo</h1></div><div class="catalog-summary"><strong>{{ listings.length }}</strong><span>resultados<br />en esta vista</span></div></div>
         <div class="active-filters"><span v-if="filters.city" class="filter-chip">{{ filters.city }} <button type="button" @click="applyFilters({ ...filters, city: '' })">×</button></span><span v-if="filters.operation" class="filter-chip">{{ filters.operation === 'SALE' ? 'Venta' : 'Arriendo' }} <button type="button" @click="applyFilters({ ...filters, operation: '' })">×</button></span><span v-if="filters.property_type" class="filter-chip">{{ filters.property_type }} <button type="button" @click="applyFilters({ ...filters, property_type: '' })">×</button></span></div>
         <div v-if="loading" class="state-panel"><div class="loader"></div><strong>Buscando propiedades</strong><span>Consultando el inventario real…</span></div>
@@ -77,7 +71,7 @@ onMounted(() => { void loadListings(); void loadStats() })
           <div class="pagination"><button type="button" :disabled="filters.offset === 0" @click="movePage(-1)">← Anterior</button><span>Página {{ Math.floor(filters.offset / filters.limit) + 1 }}</span><button type="button" :disabled="!hasMore" @click="movePage(1)">Siguiente →</button></div>
         </template>
       </section>
-      <aside class="map-column"><div class="map-heading"><div><span class="eyebrow">Vista geográfica</span><h2>Descubre por ubicación</h2></div><span class="map-count"><b>{{ locatedCount }}</b> con coordenadas</span></div><ListingMap :listings="listings" :selected-id="selected?.id ?? null" @select="selectListingFromMarker" /></aside>
+      <aside id="mapa" class="map-column"><div class="map-heading"><div><span class="eyebrow">Vista geográfica</span><h2>Descubre por ubicación</h2></div><span class="map-count"><b>{{ locatedCount }}</b> con coordenadas</span></div><ListingMap :listings="listings" :selected-id="selected?.id ?? null" @select="selectListingFromMarker" /></aside>
     </main>
     <DetailDrawer :listing="selected" @close="closeDetail" />
   </div>
