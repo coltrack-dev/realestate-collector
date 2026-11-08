@@ -26,6 +26,23 @@ type TransactionSource struct {
 	Municipality string
 	Divipola     string
 	AfterPK      string
+	YearFrom     string
+	YearTo       string
+	LegalActCode string
+	LegalActName string
+	WithValue    bool
+}
+
+// CollectBatch fetches one ordered page. The caller advances the cursor only
+// after successfully persisting the returned batch.
+func (s TransactionSource) CollectBatch(ctx context.Context, limit int, afterPK string) ([]model.PropertyTransaction, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	settings := s.settings()
+	pageSource := s
+	pageSource.AfterPK = afterPK
+	return pageSource.fetchPage(ctx, settings, 0, limit)
 }
 
 func (s TransactionSource) Name() string { return "igac-transactions" }
@@ -169,6 +186,20 @@ func (s TransactionSource) buildPageURL(endpoint string, offset, limit int) (str
 	}
 	if afterPK := strings.TrimSpace(s.AfterPK); afterPK != "" {
 		where = append(where, fmt.Sprintf("pk > '%s'", strings.ReplaceAll(afterPK, "'", "''")))
+	}
+	if yearFrom := strings.TrimSpace(s.YearFrom); yearFrom != "" {
+		where = append(where, fmt.Sprintf("year_radica >= '%s'", strings.ReplaceAll(yearFrom, "'", "''")))
+	}
+	if yearTo := strings.TrimSpace(s.YearTo); yearTo != "" {
+		where = append(where, fmt.Sprintf("year_radica <= '%s'", strings.ReplaceAll(yearTo, "'", "''")))
+	}
+	if legalActCode := strings.TrimSpace(s.LegalActCode); legalActCode != "" {
+		where = append(where, fmt.Sprintf("cod_natujur = '%s'", strings.ReplaceAll(legalActCode, "'", "''")))
+	} else if legalActName := strings.TrimSpace(s.LegalActName); legalActName != "" {
+		where = append(where, fmt.Sprintf("upper(nombre_natujur) = '%s'", strings.ToUpper(strings.ReplaceAll(legalActName, "'", "''"))))
+	}
+	if s.WithValue {
+		where = append(where, "valor IS NOT NULL")
 	}
 	if len(where) > 0 {
 		query.Set("$where", strings.Join(where, " AND "))

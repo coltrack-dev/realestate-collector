@@ -92,6 +92,84 @@ The code-level tests for the IGAC adapter pass, including all-field decoding, DI
 
 The local fixture is only a parser test and is not included in real-data statistics.
 
+## Targeted import controls
+
+The IGAC adapter supports server-side filters for `year_radica`, `cod_natujur` or `nombre_natujur`, and `valor IS NOT NULL` via `-with-value`. It always requests `$order=pk`. `-batch-size` controls each page, while `-after-pk` supplies the last successfully persisted source identifier for continuation.
+
+The import loop persists every record in a batch before advancing and logging `last_pk`. If a save fails or the process receives Ctrl+C, the cursor is not advanced for that incomplete batch; rerunning from the previous cursor is safe because `(source, external_id)` is unique and the upsert is idempotent.
+
+Task 007 implementation was verified with local fake-HTTP tests. A live 1,000-record run was not started automatically and remains pending a normal terminal with working Socrata, PostgreSQL, and Go module access.
+
+## Task 006 completeness queries
+
+The official catalog identifies this as a 26-column Socrata table with annual updates and fields including `VALOR`, `TIENE_VALOR`, `YEAR_RADICA`, and `NOMBRE_NATUJUR`. The public catalog describes the dataset as registered transactions derived from registry records, not listing offers. The API must be queried with aggregates; downloading the complete dataset is unnecessary.
+
+Use these commands from a normal terminal with a working network path. They do not write data:
+
+```bash
+API='https://www.datos.gov.co/resource/7y2j-43cv.json'
+WHERE="divipola='11001'"
+
+# Discover the actual JSON types and representative values.
+curl --fail --silent --show-error --get "$API" \
+  --data-urlencode '$select=year_radica,valor,tiene_valor,nombre_natujur' \
+  --data-urlencode "\$where=$WHERE" \
+  --data-urlencode '$limit=10' \
+  --data-urlencode '$order=pk'
+
+# All Bogotá records by year.
+curl --fail --silent --show-error --get "$API" \
+  --data-urlencode '$select=year_radica,count(*) as total' \
+  --data-urlencode "\$where=$WHERE" \
+  --data-urlencode '$group=year_radica' \
+  --data-urlencode '$order=year_radica'
+
+# COMPRAVENTA completeness by year. This assumes tiene_valor is a boolean.
+curl --fail --silent --show-error --get "$API" \
+  --data-urlencode '$select=year_radica,count(*) as total,count(valor) as valor_present,sum(case when valor is null then 1 else 0 end) as valor_null,sum(case when valor=0 then 1 else 0 end) as valor_zero,sum(case when valor>0 then 1 else 0 end) as valor_positive,sum(case when tiene_valor=true then 1 else 0 end) as tiene_valor_true' \
+  --data-urlencode "\$where=${WHERE} AND upper(nombre_natujur)='COMPRAVENTA'" \
+  --data-urlencode '$group=year_radica' \
+  --data-urlencode '$order=year_radica'
+
+# If the type discovery shows a text flag (for example SI/NO), use this variant.
+curl --fail --silent --show-error --get "$API" \
+  --data-urlencode '$select=year_radica,count(*) as total,count(valor) as valor_present,sum(case when valor is null then 1 else 0 end) as valor_null,sum(case when valor=0 then 1 else 0 end) as valor_zero,sum(case when valor>0 then 1 else 0 end) as valor_positive,sum(case when upper(tiene_valor) in ("SI","TRUE","1") then 1 else 0 end) as tiene_valor_true' \
+  --data-urlencode "\$where=${WHERE} AND upper(nombre_natujur)='COMPRAVENTA'" \
+  --data-urlencode '$group=year_radica' \
+  --data-urlencode '$order=year_radica'
+```
+
+For a local live sample, use these read-only queries after importing exactly 1,000 records:
+
+```sql
+SELECT year, count(*)
+FROM property_transactions
+WHERE source = 'igac-transactions' AND divipola = '11001'
+GROUP BY year ORDER BY year;
+
+SELECT legal_act_code, legal_act_name, count(*)
+FROM property_transactions
+WHERE source = 'igac-transactions' AND divipola = '11001'
+GROUP BY legal_act_code, legal_act_name
+ORDER BY count(*) DESC;
+
+SELECT year,
+       count(*) AS total,
+       count(*) FILTER (WHERE transaction_value IS NULL) AS value_null,
+       count(*) FILTER (WHERE transaction_value = 0) AS value_zero,
+       count(*) FILTER (WHERE transaction_value > 0) AS value_positive,
+       count(*) FILTER (WHERE has_value IS TRUE) AS has_value_true
+FROM property_transactions
+WHERE source = 'igac-transactions'
+  AND divipola = '11001'
+  AND upper(legal_act_name) = 'COMPRAVENTA'
+GROUP BY year ORDER BY year;
+```
+
+### Task 006 result status
+
+The aggregate API requests and the local 1,000-record comparison were not executed successfully in this environment. The sandbox has no working route to the Socrata API, and the project PostgreSQL service is not reachable from the sandbox. Therefore no year-by-year counts, NULL/zero/positive value counts, `tiene_valor` counts, or local-vs-API comparison numbers are claimed here. The commands above are the reproducible next step in a normal Ubuntu terminal.
+
 ## Task 005 verification
 
 The project `.env` was present and contains `DATABASE_URL`, `AUTH_MODE`, `USER_AGENT`, `REQUEST_DELAY`, `MAX_PAGES`, and `MAX_LISTINGS`. The application does not load `.env` itself; commands must export it, for example:

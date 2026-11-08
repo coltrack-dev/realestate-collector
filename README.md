@@ -16,6 +16,22 @@ go run ./cmd/collector -source=igac-transactions -divipola=11001 -limit=100 -dry
 
 To resume after a known IGAC record, add `-after-pk=<last-pk>`. The adapter uses `$order=pk` and retains the source `pk` as the idempotency key.
 
+Targeted historical import (manual start, maximum 1000 records):
+
+```bash
+go run ./cmd/collector \
+  -source=igac-transactions \
+  -divipola=11001 \
+  -year-from=2021 \
+  -year-to=2023 \
+  -legal-act-name=COMPRAVENTA \
+  -with-value \
+  -batch-size=100 \
+  -limit=1000
+```
+
+The collector logs `read`, `saved`, `updated`, `skipped`, `last_pk`, and processing speed after each successfully persisted batch. If interrupted, rerun with the last logged `-after-pk`; the cursor advances only after the complete batch is saved.
+
 For database import, apply `migrations/001_init.sql` and then `migrations/002_expand_igac_transactions.sql` to the isolated Compose database, set `DATABASE_URL`, omit `-dry-run`, and use a small limit first. See [`docs/SOURCE_CANDIDATES.md`](docs/SOURCE_CANDIDATES.md) and [`docs/IGAC_DATA_ANALYSIS.md`](docs/IGAC_DATA_ANALYSIS.md).
 
 ## Run

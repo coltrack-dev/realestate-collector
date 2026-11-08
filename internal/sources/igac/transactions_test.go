@@ -18,13 +18,41 @@ func TestDecodePage(t *testing.T) {
 }
 
 func TestBuildPageURLUsesDivipolaAndCursor(t *testing.T) {
-	source := TransactionSource{Divipola: "11001", AfterPK: "abc"}
+	source := TransactionSource{
+		Divipola:     "11001",
+		AfterPK:      "abc",
+		YearFrom:     "2021",
+		YearTo:       "2023",
+		LegalActName: "COMPRAVENTA",
+		WithValue:    true,
+	}
 	pageURL, err := source.buildPageURL("https://example.test/resource.json", 100, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(pageURL, "divipola") || !strings.Contains(pageURL, "11001") || !strings.Contains(pageURL, "pk") || !strings.Contains(pageURL, "abc") {
+	for _, expected := range []string{"divipola", "11001", "pk", "abc", "2021", "2023", "COMPRAVENTA", "valor+IS+NOT+NULL"} {
+		if !strings.Contains(pageURL, expected) {
+			t.Fatalf("URL %q does not contain %q", pageURL, expected)
+		}
+	}
+	if !strings.Contains(pageURL, "$where") && !strings.Contains(pageURL, "%24where") {
 		t.Fatalf("unexpected URL: %s", pageURL)
+	}
+}
+
+func TestCollectBatchUsesCursorForNextPage(t *testing.T) {
+	var requestedURL string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requestedURL = r.URL.String()
+		body := `[ {"pk":"next"} ]`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	rows, err := (TransactionSource{Client: client, Endpoint: "http://fixture.invalid", Divipola: "11001"}).CollectBatch(context.Background(), 100, "previous")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	if !strings.Contains(requestedURL, "previous") || !strings.Contains(requestedURL, "11001") {
+		t.Fatalf("cursor/filter missing from %s", requestedURL)
 	}
 }
 func TestCollectPaginationAndCancellation(t *testing.T) {
