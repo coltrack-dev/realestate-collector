@@ -116,6 +116,16 @@ func Hashable(l model.Listing) string {
 	if l.ParkingSpots != nil {
 		b.WriteString(strconv.Itoa(*l.ParkingSpots))
 	}
+	if l.Latitude != nil {
+		b.WriteString(strconv.FormatFloat(*l.Latitude, 'f', 8, 64))
+	}
+	if l.Longitude != nil {
+		b.WriteString(strconv.FormatFloat(*l.Longitude, 'f', 8, 64))
+	}
+	for _, image := range l.Images {
+		b.WriteString(CanonicalURL(image))
+		b.WriteByte('|')
+	}
 	return b.String()
 }
 func CleanListing(l model.Listing) model.Listing {

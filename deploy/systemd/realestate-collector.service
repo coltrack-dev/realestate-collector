@@ -1,0 +1,12 @@
+[Unit]
+Description=Real estate listings collector
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/tatarino/projects3/realestate-collector
+EnvironmentFile=/home/tatarino/projects3/realestate-collector/.env
+ExecStart=/usr/local/go/bin/go run ./cmd/collector -source=vixora -limit=50
+NoNewPrivileges=true
+PrivateTmp=true
+

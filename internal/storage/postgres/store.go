@@ -108,15 +108,21 @@ ON CONFLICT(source_id, external_id) DO UPDATE SET
     description = EXCLUDED.description,
     operation = EXCLUDED.operation,
     property_type = EXCLUDED.property_type,
-    price = EXCLUDED.price,
-    currency = EXCLUDED.currency,
-    area_m2 = EXCLUDED.area_m2,
-    bedrooms = EXCLUDED.bedrooms,
-    bathrooms = EXCLUDED.bathrooms,
-    parking_spots = EXCLUDED.parking_spots,
+    price = COALESCE(EXCLUDED.price, listings.price),
+    currency = COALESCE(NULLIF(EXCLUDED.currency, ''), listings.currency),
+    area_m2 = COALESCE(EXCLUDED.area_m2, listings.area_m2),
+    bedrooms = COALESCE(EXCLUDED.bedrooms, listings.bedrooms),
+    bathrooms = COALESCE(EXCLUDED.bathrooms, listings.bathrooms),
+    parking_spots = COALESCE(EXCLUDED.parking_spots, listings.parking_spots),
+    country = COALESCE(NULLIF(EXCLUDED.country, ''), listings.country),
+    department = COALESCE(NULLIF(EXCLUDED.department, ''), listings.department),
     city = EXCLUDED.city,
     neighborhood = EXCLUDED.neighborhood,
+    address = COALESCE(NULLIF(EXCLUDED.address, ''), listings.address),
+    latitude = COALESCE(EXCLUDED.latitude, listings.latitude),
+    longitude = COALESCE(EXCLUDED.longitude, listings.longitude),
     images = EXCLUDED.images,
+    published_at = EXCLUDED.published_at,
     last_seen_at = EXCLUDED.last_seen_at,
     updated_at = EXCLUDED.updated_at
 RETURNING id, (xmax = 0)`
@@ -225,6 +231,9 @@ func upsertListing(ctx context.Context, tx databaseTransaction, sourceID int64, 
 	images, err := json.Marshal(listing.Images)
 	if err != nil {
 		return 0, false, fmt.Errorf("encode images for listing %s: %w", listing.ExternalID, err)
+	}
+	if listing.Images == nil {
+		images = []byte("[]")
 	}
 	var listingID int64
 	var created bool

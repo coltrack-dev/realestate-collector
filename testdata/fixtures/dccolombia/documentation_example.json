@@ -1,0 +1,22 @@
+{
+  "properties": [
+    {
+      "slug": "wasi-10018216",
+      "title": "APARTAMENTO EN VENTA...",
+      "operation": "rent",
+      "property_type": "apartment",
+      "is_featured": false,
+      "lat": 4.6462,
+      "lng": -74.1556,
+      "neighborhood": "Chapinero",
+      "city": "Bogotá D.C.",
+      "bedrooms": 3,
+      "bathrooms": 2,
+      "parking_spots": 0,
+      "area": 79,
+      "price_sale": null,
+      "price_rent": 2800000,
+      "cover": "https://www.dccolombia.com.co/img/w302383203.jpg"
+    }
+  ]
+}

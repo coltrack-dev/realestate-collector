@@ -1,0 +1,10 @@
+[Unit]
+Description=Run real estate listings collector daily
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=24h
+Persistent=false
+
+[Install]
+WantedBy=timers.target

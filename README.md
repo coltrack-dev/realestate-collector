@@ -46,4 +46,78 @@ docker compose up -d
 Apply `migrations/001_init.sql` using an isolated Compose database before persistence. `-dry-run` never connects to PostgreSQL.
 
 The design uses `Source`, parser/normalizer, PostgreSQL upsert and content-hash snapshots. The schema guarantees `(source_id, external_id)` uniqueness and suppresses duplicate snapshots.
+
+## Universal local listings importer
+
+The `file` source imports local JSON or CSV without contacting an external site.
+Rows use the `Listing` fields (snake_case or Go-style names), and rows without a
+`source` use `-source-name`. Price values are stored as integer source units;
+currency is preserved and no conversion is performed.
+
+JSON dry-run:
+
+```bash
+go run ./cmd/collector \
+  -source=file \
+  -input=testdata/fixtures/listings.json \
+  -format=json \
+  -source-name=fixture-json \
+  -limit=20 \
+  -dry-run
+```
+
+CSV import into the configured isolated PostgreSQL database:
+
+```bash
+go run ./cmd/collector \
+  -source=file \
+  -input=testdata/fixtures/listings.csv \
+  -format=csv \
+  -source-name=agency-feed \
+  -limit=100
+```
+
+The importer reports read, accepted, skipped, created, updated, snapshot and
+validation-error counts. A repeated import is idempotent; the PostgreSQL store
+creates a new `listing_snapshots` row only when the content hash changes.
+External listing sources remain disabled until automated access and data reuse
+are explicitly permitted. See [`docs/LISTINGS_SOURCES_RESEARCH.md`](docs/LISTINGS_SOURCES_RESEARCH.md)
+and [`docs/MERCADO_LIBRE_COLOMBIA.md`](docs/MERCADO_LIBRE_COLOMBIA.md).
+
+## Live listings MVP
+
+VIXORA and D.C Colombia expose documented public read APIs. The adapters use
+only those APIs, do not submit credentials or contact data, and keep requests
+sequential with a bounded rate limit.
+
+```bash
+go run ./cmd/collector -source=vixora -limit=30 -dry-run
+go run ./cmd/collector -source=dccolombia -limit=50 -dry-run
+```
+
+After checking the isolated `DATABASE_URL`, omit `-dry-run` for a limited
+import. The first verified import stored 30 VIXORA and 50 D.C Colombia listings;
+the repeated import created no duplicates and no additional snapshots. See
+[`docs/LIVE_LISTINGS_MVP.md`](docs/LIVE_LISTINGS_MVP.md).
+
+## Read-only listings API
+
+Start the local API with the isolated database configured in `DATABASE_URL`:
+
+```bash
+go run ./cmd/api
+```
+
+It listens on `127.0.0.1:8080` by default. Available endpoints:
+
+```text
+GET /health
+GET /api/v1/listings?source=vixora&city=Bogotá%20D.C.&operation=SALE&property_type=APARTMENT&limit=50&offset=0
+GET /api/v1/listings/{id}
+GET /api/v1/listings/{id}/history
+GET /api/v1/stats
+```
+
+The API is read-only, uses parameterized PostgreSQL queries, applies filters in
+PostgreSQL, and caps pages at 100 records. It does not expose contact details.
 # realestate-collector

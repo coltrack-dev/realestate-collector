@@ -20,6 +20,9 @@ func Load() Config {
 		MaxPages:    3,
 		MaxListings: 50,
 	}
+	if c.UserAgent == "" {
+		c.UserAgent = "realestate-collector/0.1"
+	}
 	if v := os.Getenv("AUTH_MODE"); v == "session" {
 		c.AuthMode = v
 	}

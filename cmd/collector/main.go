@@ -9,14 +9,19 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/example/realestate-collector/internal/config"
+	"github.com/example/realestate-collector/internal/importer"
 	"github.com/example/realestate-collector/internal/model"
 	"github.com/example/realestate-collector/internal/parser"
 	"github.com/example/realestate-collector/internal/sources/ciencuadras"
+	"github.com/example/realestate-collector/internal/sources/dccolombia"
 	"github.com/example/realestate-collector/internal/sources/igac"
+	"github.com/example/realestate-collector/internal/sources/vixora"
 	"github.com/example/realestate-collector/internal/storage/postgres"
 )
 
@@ -33,6 +38,9 @@ type commandOptions struct {
 	batchSize    int
 	limit        int
 	dryRun       bool
+	input        string
+	format       string
+	sourceName   string
 }
 
 type collectedData struct {
@@ -58,6 +66,14 @@ func main() {
 	}
 
 	if options.dryRun {
+		if len(data.listings) > 0 {
+			stats, importErr := importer.Import(ctx, data.listings, nil, true)
+			if importErr != nil {
+				log.Fatal(importErr)
+			}
+			slog.Info("listing dry-run complete", "read", stats.Read, "accepted", stats.Accepted,
+				"skipped", stats.Skipped, "errors", stats.Errors)
+		}
 		if err := printDryRun(data, options.source); err != nil {
 			log.Fatal(err)
 		}
@@ -71,7 +87,7 @@ func main() {
 
 func parseOptions() commandOptions {
 	options := commandOptions{}
-	flag.StringVar(&options.source, "source", "fixture", "source: fixture, ciencuadras, or igac-transactions")
+	flag.StringVar(&options.source, "source", "fixture", "source: fixture, file, ciencuadras, or igac-transactions")
 	flag.IntVar(&options.limit, "limit", 50, "maximum number of records")
 	flag.BoolVar(&options.dryRun, "dry-run", false, "parse without database writes")
 	flag.StringVar(&options.city, "city", "bogota", "city filter for live sources")
@@ -83,6 +99,9 @@ func parseOptions() commandOptions {
 	flag.StringVar(&options.legalActName, "legal-act-name", "", "IGAC legal act name")
 	flag.BoolVar(&options.withValue, "with-value", false, "only records with non-NULL valor")
 	flag.IntVar(&options.batchSize, "batch-size", 100, "records per import batch")
+	flag.StringVar(&options.input, "input", "", "local JSON or CSV file for -source=file")
+	flag.StringVar(&options.format, "format", "", "input format: json or csv; inferred from extension")
+	flag.StringVar(&options.sourceName, "source-name", "file", "source identifier for rows without source")
 	flag.String("operation", "sale", "operation filter for listing sources")
 	flag.String("property", "apartment", "property filter for listing sources")
 	flag.Parse()
@@ -103,8 +122,27 @@ func collect(ctx context.Context, options commandOptions) (collectedData, error)
 			listings = listings[:options.limit]
 		}
 		return collectedData{listings: listings}, err
+	case "file":
+		listings, err := collectFile(options.input, options.format, options.sourceName)
+		if err != nil {
+			return collectedData{}, err
+		}
+		if len(listings) > options.limit {
+			listings = listings[:options.limit]
+		}
+		return collectedData{listings: listings}, nil
 	case "ciencuadras":
 		listings, err := (ciencuadras.Source{Live: false}).Collect(ctx, options.limit)
+		return collectedData{listings: listings}, err
+	case "vixora":
+		settings := config.Load()
+		source := vixora.New(nil, settings.UserAgent, settings.Delay)
+		listings, err := source.Collect(ctx, options.limit)
+		return collectedData{listings: listings}, err
+	case "dccolombia":
+		settings := config.Load()
+		source := dccolombia.New(nil, settings.UserAgent, settings.Delay)
+		listings, err := source.Collect(ctx, options.limit)
 		return collectedData{listings: listings}, err
 	case "igac-transactions":
 		settings := config.Load()
@@ -260,6 +298,28 @@ func collectFixture() ([]model.Listing, error) {
 	return listings, nil
 }
 
+func collectFile(path, format, source string) ([]model.Listing, error) {
+	if path == "" {
+		return nil, fmt.Errorf("input is required for -source=file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open input file: %w", err)
+	}
+	defer file.Close()
+	if format == "" {
+		format = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+	}
+	switch format {
+	case "json":
+		return parser.ParseListingsJSON(file, source)
+	case "csv":
+		return parser.ParseListingsCSV(file, source)
+	default:
+		return nil, fmt.Errorf("unsupported input format %q; use json or csv", format)
+	}
+}
+
 func printDryRun(data collectedData, source string) error {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
@@ -314,26 +374,17 @@ func persistListings(ctx context.Context, store *postgres.Store, listings []mode
 	if err != nil {
 		return err
 	}
-	created, snapshots := 0, 0
-	for _, listing := range listings {
-		if listing.ExternalID == "" {
-			continue
-		}
-		wasCreated, snapshotCreated, saveErr := store.Save(ctx, listing)
-		if saveErr != nil {
-			_ = store.FinishRun(ctx, runID, "FAILED", len(listings), created, snapshots, saveErr)
-			return saveErr
-		}
-		if wasCreated {
-			created++
-		}
-		if snapshotCreated {
-			snapshots++
-		}
+	stats, importErr := importer.Import(ctx, listings, store, false)
+	if importErr != nil {
+		_ = store.FinishRun(ctx, runID, "FAILED", stats.Read, stats.Created, stats.Updated, importErr)
+		return importErr
 	}
-	if err := store.FinishRun(ctx, runID, "SUCCEEDED", len(listings), created, snapshots, nil); err != nil {
+	if err := store.FinishRun(ctx, runID, "SUCCEEDED", stats.Read, stats.Created, stats.Updated, nil); err != nil {
 		return err
 	}
-	slog.Info("collection complete", "source", source, "listings_found", len(listings), "created", created, "snapshots_created", snapshots)
+	slog.Info("collection complete", "source", source, "read", stats.Read,
+		"accepted", stats.Accepted, "skipped", stats.Skipped,
+		"created", stats.Created, "updated", stats.Updated,
+		"snapshots_created", stats.SnapshotsCreated, "errors", stats.Errors)
 	return nil
 }
