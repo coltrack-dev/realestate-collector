@@ -22,18 +22,18 @@ const (
 var ErrNotFound = errors.New("listing not found")
 
 type ListingFilter struct {
-	Source, City, Operation, PropertyType string
-	MinPrice, MaxPrice                     *int64
-	MinArea, MaxArea                       *float64
-	Limit, Offset                          int
+	Source, CountryCode, City, Operation, PropertyType string
+	MinPrice, MaxPrice                                 *int64
+	MinArea, MaxArea                                   *float64
+	Limit, Offset                                      int
 }
 
 type Snapshot struct {
-	ID          int64 `json:"id"`
-	Price       *int64 `json:"price"`
-	Currency    *string `json:"currency"`
-	AreaM2      *float64 `json:"area_m2"`
-	ContentHash string `json:"content_hash"`
+	ID          int64     `json:"id"`
+	Price       *int64    `json:"price"`
+	Currency    *string   `json:"currency"`
+	AreaM2      *float64  `json:"area_m2"`
+	ContentHash string    `json:"content_hash"`
 	CollectedAt time.Time `json:"collected_at"`
 }
 
@@ -45,10 +45,10 @@ type ListingRecord struct {
 }
 
 type Stats struct {
-	Total           int64            `json:"total"`
-	BySource        map[string]int64 `json:"by_source"`
-	ByOperation     map[string]int64 `json:"by_operation"`
-	LastUpdatedAt   *time.Time       `json:"last_updated_at"`
+	Total         int64            `json:"total"`
+	BySource      map[string]int64 `json:"by_source"`
+	ByOperation   map[string]int64 `json:"by_operation"`
+	LastUpdatedAt *time.Time       `json:"last_updated_at"`
 }
 
 type Repository interface {
@@ -61,10 +61,14 @@ type Repository interface {
 
 type Server struct {
 	Repository Repository
+	Details    *DetailsService
 }
 
-func NewServer(repository Repository) http.Handler {
+func NewServer(repository Repository, details ...*DetailsService) http.Handler {
 	server := &Server{Repository: repository}
+	if len(details) > 0 {
+		server.Details = details[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", server.health)
 	mux.HandleFunc("/api/v1/listings", server.listings)
@@ -105,13 +109,13 @@ func (s *Server) listings(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"data": listingResponses(listings),
+		"data":       listingResponses(listings),
 		"pagination": map[string]int{"limit": filter.Limit, "offset": filter.Offset, "total": int(total)},
 	})
 }
 
 func (s *Server) listingByID(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet {
+	if request.Method != http.MethodGet && request.Method != http.MethodPost {
 		methodNotAllowed(writer)
 		return
 	}
@@ -128,6 +132,39 @@ func (s *Server) listingByID(writer http.ResponseWriter, request *http.Request) 
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), RequestTimeout)
 	defer cancel()
+	if len(parts) == 2 && parts[1] == "refresh-details" {
+		if request.Method != http.MethodPost {
+			methodNotAllowed(writer)
+			return
+		}
+		if s.Details == nil {
+			writeError(writer, http.StatusNotImplemented, "details refresh is not configured")
+			return
+		}
+		listing, err := s.Details.Refresh(ctx, id)
+		if errors.Is(err, ErrNotFound) {
+			writeError(writer, http.StatusNotFound, "listing not found")
+			return
+		}
+		if errors.Is(err, ErrDetailsUnsupported) {
+			writeError(writer, http.StatusNotImplemented, err.Error())
+			return
+		}
+		if errors.Is(err, ErrDetailsRateLimited) {
+			writeError(writer, http.StatusTooManyRequests, err.Error())
+			return
+		}
+		if err != nil {
+			writeError(writer, http.StatusBadGateway, "failed to refresh listing details")
+			return
+		}
+		writeJSON(writer, http.StatusOK, listingResponse(listing))
+		return
+	}
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "history" {
 		if _, err := s.Repository.Get(ctx, id); errors.Is(err, ErrNotFound) {
 			writeError(writer, http.StatusNotFound, "listing not found")
@@ -178,7 +215,7 @@ func (s *Server) stats(writer http.ResponseWriter, request *http.Request) {
 func parseFilter(request *http.Request) (ListingFilter, error) {
 	query := request.URL.Query()
 	filter := ListingFilter{
-		Source: query.Get("source"), City: query.Get("city"),
+		Source: query.Get("source"), CountryCode: query.Get("country_code"), City: query.Get("city"),
 		Operation: query.Get("operation"), PropertyType: query.Get("property_type"),
 		Limit: DefaultPageSize,
 	}
@@ -196,29 +233,49 @@ func parseFilter(request *http.Request) (ListingFilter, error) {
 		}
 	}
 	filter.MinPrice, err = optionalInt64(query.Get("min_price"), "min_price")
-	if err != nil { return ListingFilter{}, err }
+	if err != nil {
+		return ListingFilter{}, err
+	}
 	filter.MaxPrice, err = optionalInt64(query.Get("max_price"), "max_price")
-	if err != nil { return ListingFilter{}, err }
+	if err != nil {
+		return ListingFilter{}, err
+	}
 	filter.MinArea, err = optionalFloat64(query.Get("min_area"), "min_area")
-	if err != nil { return ListingFilter{}, err }
+	if err != nil {
+		return ListingFilter{}, err
+	}
 	filter.MaxArea, err = optionalFloat64(query.Get("max_area"), "max_area")
-	if err != nil { return ListingFilter{}, err }
-	if filter.MinPrice != nil && filter.MaxPrice != nil && *filter.MinPrice > *filter.MaxPrice { return ListingFilter{}, errors.New("min_price must not exceed max_price") }
-	if filter.MinArea != nil && filter.MaxArea != nil && *filter.MinArea > *filter.MaxArea { return ListingFilter{}, errors.New("min_area must not exceed max_area") }
+	if err != nil {
+		return ListingFilter{}, err
+	}
+	if filter.MinPrice != nil && filter.MaxPrice != nil && *filter.MinPrice > *filter.MaxPrice {
+		return ListingFilter{}, errors.New("min_price must not exceed max_price")
+	}
+	if filter.MinArea != nil && filter.MaxArea != nil && *filter.MinArea > *filter.MaxArea {
+		return ListingFilter{}, errors.New("min_area must not exceed max_area")
+	}
 	return filter, nil
 }
 
 func optionalInt64(value, name string) (*int64, error) {
-	if value == "" { return nil, nil }
+	if value == "" {
+		return nil, nil
+	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil { return nil, fmt.Errorf("%s must be an integer", name) }
+	if err != nil {
+		return nil, fmt.Errorf("%s must be an integer", name)
+	}
 	return &parsed, nil
 }
 
 func optionalFloat64(value, name string) (*float64, error) {
-	if value == "" { return nil, nil }
+	if value == "" {
+		return nil, nil
+	}
 	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil { return nil, fmt.Errorf("%s must be a number", name) }
+	if err != nil {
+		return nil, fmt.Errorf("%s must be a number", name)
+	}
 	return &parsed, nil
 }
 
@@ -241,7 +298,9 @@ func listingResponse(record ListingRecord) listingJSON {
 
 func listingResponses(records []ListingRecord) []listingJSON {
 	result := make([]listingJSON, 0, len(records))
-	for _, record := range records { result = append(result, listingResponse(record)) }
+	for _, record := range records {
+		result = append(result, listingResponse(record))
+	}
 	return result
 }
 

@@ -1,0 +1,22 @@
+{
+  "code": "FIN-0012",
+  "slug": "finca-en-venta-con-quebrada-a1b2c3",
+  "title": "Finca en venta con quebrada en Rionegro",
+  "type": "finca",
+  "operation": "venta",
+  "status": "published",
+  "price": {"amount": 850000000, "currency": "COP"},
+  "location": {"department": "Antioquia", "municipality": "Rionegro", "vereda": "Cabeceras", "point": {"lat": 6.153, "lon": -75.4}},
+  "areas": {"built_m2": 180, "lot_m2": 12000},
+  "bedrooms": 4,
+  "bathrooms": 3,
+  "image": "https://media.example.invalid/fin-0012-1.jpg",
+  "images": [
+    "https://media.example.invalid/fin-0012-1.jpg",
+    "https://media.example.invalid/fin-0012-2.jpg",
+    "https://media.example.invalid/fin-0012-3.jpg"
+  ],
+  "published_at": "2026-01-01T00:00:00Z",
+  "url": "https://vixora.test/fin-0012",
+  "description": "Fixture detail"
+}

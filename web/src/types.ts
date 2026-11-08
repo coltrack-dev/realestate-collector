@@ -14,17 +14,26 @@ export interface Listing {
   bathrooms: number | null
   parking_spots: number | null
   country: string | null
+  country_code: string | null
   department: string | null
   city: string | null
   neighborhood: string | null
   address: string | null
   latitude: number | null
   longitude: number | null
+  resolved_latitude: number | null
+  resolved_longitude: number | null
+  location_precision: 'EXACT' | 'ADDRESS' | 'NEIGHBORHOOD' | 'CITY' | 'DEPARTMENT' | 'COUNTRY' | 'UNKNOWN' | string
+  geocode_provider: string | null
+  geocoded_at: string | null
   images: string[]
   published_at: string | null
   collected_at: string
   first_seen_at: string
   last_seen_at: string
+  details_fetched_at: string | null
+  details_expires_at: string | null
+  details_status: 'NOT_LOADED' | 'LOADING' | 'READY' | 'FAILED' | 'UNSUPPORTED' | string
 }
 
 export interface Snapshot {
@@ -50,6 +59,7 @@ export interface Stats {
 
 export interface ListingFilters {
   source: string
+  country_code: string
   city: string
   operation: string
   property_type: string

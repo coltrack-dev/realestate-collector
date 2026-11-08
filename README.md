@@ -100,6 +100,53 @@ import. The first verified import stored 30 VIXORA and 50 D.C Colombia listings;
 the repeated import created no duplicates and no additional snapshots. See
 [`docs/LIVE_LISTINGS_MVP.md`](docs/LIVE_LISTINGS_MVP.md).
 
+Listing images remain external URLs by default (`IMAGE_STORAGE_MODE=EXTERNAL_URL`).
+VIXORA detail responses are fetched lazily for an opened listing to preserve the complete ordered image list;
+D.C Colombia currently exposes only the confirmed `cover` field in its public
+JSON response. Migration `003_listing_images.sql` prepares per-image positions,
+hashes, MIME metadata, temporary-cache expiry and revocation fields without
+storing image bytes in PostgreSQL. `TEMP_CACHE` and `LOCAL_STORAGE` are
+available as explicit future modes; no live image download is started by the
+collector automatically.
+
+Before a database-backed listings import, apply `migrations/003_listing_images.sql`
+after the existing migrations. The collector does not run migrations
+automatically.
+
+Property details are lazy: VIXORA search imports only Summary data and does not
+call a detail endpoint. The read API serves saved data from PostgreSQL; the UI
+may request `POST /api/v1/listings/{id}/refresh-details` for one opened listing.
+Details are cached for `DETAILS_TTL` (default `24h`), concurrent refreshes are
+deduplicated, and failed retries have a cooldown. Apply
+`migrations/004_lazy_listing_details.sql` manually before starting the API.
+
+Location fallback is separate from source coordinates. Migration
+`007_listing_geocoding.sql` adds `resolved_latitude`, `resolved_longitude`,
+`location_precision`, provider and timestamp fields; it is not applied
+automatically. The original `latitude`/`longitude` values are never overwritten.
+The current local geocoder resolves only curated city, department and country
+centers. It does not perform mass external geocoding and does not represent an
+administrative center as an exact property marker.
+
+## Uruguay
+
+The first Uruguay source is the public Inmuebles El País / Gallito MCP adapter.
+It uses the official Streamable HTTP endpoint without OAuth for search and
+public listing details:
+
+```bash
+go run ./cmd/collector \
+  -source=gallito -city=Montevideo -operation=sale \
+  -property=apartment -limit=20 -dry-run
+```
+
+Apply `migrations/005_listing_country_code.sql` and
+`migrations/006_backfill_country_code.sql` manually before importing Uruguay.
+The adapter stores `country_code=UY`, preserves USD/UYU without conversion,
+uses the MCP listing id as `external_id`, and does not collect agency contact
+details. See [`docs/URUGUAY_SOURCES.md`](docs/URUGUAY_SOURCES.md) for access and
+retention limitations.
+
 ## Read-only listings API
 
 Start the local API with the isolated database configured in `DATABASE_URL`:
@@ -115,6 +162,7 @@ GET /health
 GET /api/v1/listings?source=vixora&city=Bogotá%20D.C.&operation=SALE&property_type=APARTMENT&limit=50&offset=0
 GET /api/v1/listings/{id}
 GET /api/v1/listings/{id}/history
+POST /api/v1/listings/{id}/refresh-details
 GET /api/v1/stats
 ```
 

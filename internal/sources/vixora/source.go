@@ -43,6 +43,7 @@ type response struct {
 
 type property struct {
 	Code      string `json:"code"`
+	Slug      string `json:"slug"`
 	Title     string `json:"title"`
 	Type      string `json:"type"`
 	Operation string `json:"operation"`
@@ -52,10 +53,10 @@ type property struct {
 		Currency string `json:"currency"`
 	} `json:"price"`
 	Location struct {
-		Department  string `json:"department"`
+		Department   string `json:"department"`
 		Municipality string `json:"municipality"`
-		Vereda      string `json:"vereda"`
-		Point       *struct {
+		Vereda       string `json:"vereda"`
+		Point        *struct {
 			Latitude  float64 `json:"lat"`
 			Longitude float64 `json:"lon"`
 		} `json:"point"`
@@ -64,13 +65,13 @@ type property struct {
 		BuiltM2 *float64 `json:"built_m2"`
 		LotM2   *float64 `json:"lot_m2"`
 	} `json:"areas"`
-	Bedrooms   *int      `json:"bedrooms"`
-	Bathrooms  *int      `json:"bathrooms"`
-	Image      string    `json:"image"`
-	URL        string    `json:"url"`
+	Bedrooms    *int       `json:"bedrooms"`
+	Bathrooms   *int       `json:"bathrooms"`
+	Image       string     `json:"image"`
+	URL         string     `json:"url"`
 	PublishedAt *time.Time `json:"published_at"`
-	Description string `json:"description"`
-	Images     []string  `json:"images"`
+	Description string     `json:"description"`
+	Images      []string   `json:"images"`
 }
 
 func (s Source) Collect(ctx context.Context, limit int) ([]model.Listing, error) {
@@ -127,6 +128,30 @@ func (s Source) Collect(ctx context.Context, limit int) ([]model.Listing, error)
 	return listings, nil
 }
 
+func (s Source) FetchDetails(ctx context.Context, externalID string) (model.Listing, error) {
+	if strings.TrimSpace(externalID) == "" {
+		return model.Listing{}, fmt.Errorf("VIXORA external ID is required")
+	}
+	if s.Client == nil {
+		s.Client = httpclient.New(nil, "realestate-collector/0.1", 3*time.Second)
+	}
+	if s.Endpoint == "" {
+		s.Endpoint = DefaultEndpoint
+	}
+	endpoint, err := url.Parse(strings.TrimRight(s.Endpoint, "/") + "/" + url.PathEscape(externalID))
+	if err != nil {
+		return model.Listing{}, fmt.Errorf("parse VIXORA detail endpoint: %w", err)
+	}
+	var detail property
+	if err := s.Client.GetJSON(ctx, endpoint.String(), &detail); err != nil {
+		return model.Listing{}, err
+	}
+	if detail.Code == "" {
+		return model.Listing{}, fmt.Errorf("VIXORA detail response has no code")
+	}
+	return toListing(detail)
+}
+
 func toListing(item property) (model.Listing, error) {
 	if item.Code == "" || item.URL == "" {
 		return model.Listing{}, fmt.Errorf("VIXORA property has no code or URL")
@@ -154,7 +179,7 @@ func toListing(item property) (model.Listing, error) {
 		Source: "vixora", ExternalID: item.Code, URL: item.URL, Title: item.Title,
 		Description: item.Description, Operation: item.Operation, PropertyType: item.Type,
 		Price: price, Currency: currency, AreaM2: area, Bedrooms: item.Bedrooms,
-		Bathrooms: item.Bathrooms, Country: "Colombia", Department: item.Location.Department,
+		Bathrooms: item.Bathrooms, Country: "Colombia", CountryCode: "CO", Department: item.Location.Department,
 		City: item.Location.Municipality, Neighborhood: item.Location.Vereda,
 		Latitude: latitude, Longitude: longitude, Images: uniqueStrings(images),
 		PublishedAt: item.PublishedAt, CollectedAt: time.Now().UTC(),
@@ -178,3 +203,4 @@ func uniqueStrings(values []string) []string {
 }
 
 var _ collector.Source = Source{}
+var _ collector.DetailSource = Source{}

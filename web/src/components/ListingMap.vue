@@ -6,11 +6,14 @@ import type { Listing } from '../types'
 import { resolveImageUrl } from '../api/client'
 import {
   COLOMBIA_CENTER,
+  URUGUAY_CENTER,
   getCoordinateDiagnostics,
+  getLocationPrecision,
+  getNavigationTarget,
   getValidCoordinates,
   getValidListings,
 } from '../map/coordinates'
-import { getInitialCameraAction, getSelectionCameraAction } from '../map/camera'
+import { getSelectionCameraAction, zoomForPrecision } from '../map/camera'
 
 setWorkerUrl(workerUrl)
 
@@ -20,7 +23,7 @@ const emit = defineEmits<{ select: [listing: Listing, source: SelectionSource] }
 const mapElement = ref<HTMLElement | null>(null)
 let map: Map | null = null
 let mapReady = false
-let initialFitDone = false
+let initialFitCountry: string | null = null
 let resizeObserver: ResizeObserver | null = null
 let popup: Popup | null = null
 let popupHideTimer: ReturnType<typeof setTimeout> | null = null
@@ -142,7 +145,8 @@ function fitToListings() {
   if (!map) return
   const available = mappedListings()
   if (available.length === 0) {
-    map.flyTo({ center: COLOMBIA_CENTER, zoom: 5, duration: 500 })
+    const center = props.listings[0]?.country_code === 'UY' ? URUGUAY_CENTER : COLOMBIA_CENTER
+    map.flyTo({ center, zoom: 5, duration: 500 })
     return
   }
   const firstCoordinate = getValidCoordinates(available[0])
@@ -159,9 +163,9 @@ function fitToListings() {
 function flyToSelectedListing(selectedId: number | null) {
   if (!map || !mapReady || selectedId == null) return
   const listing = props.listings.find((candidate) => candidate.id === selectedId)
-  const coordinate = listing ? getValidCoordinates(listing) : null
-  if (!coordinate) return
-  map.flyTo({ center: coordinate, zoom: 12, duration: 500 })
+  const target = listing ? getNavigationTarget(listing) : null
+  if (!target) return
+  map.flyTo({ center: target.coordinate, zoom: zoomForPrecision(target.precision), duration: 500 })
 }
 
 function updateMarkerStates(): void {
@@ -173,8 +177,9 @@ function updateMarkerStates(): void {
 function handleListingsChanged() {
   if (!mapReady) return
   renderMarkers()
-  if (getInitialCameraAction(initialFitDone, props.listings.length) !== 'initial-fit') return
-  initialFitDone = true
+  const country = props.listings[0]?.country_code ?? null
+  if (!country || initialFitCountry === country) return
+  initialFitCountry = country
   fitToListings()
 }
 
@@ -188,8 +193,9 @@ onMounted(() => {
     mapReady = true
     map?.resize()
     renderMarkers()
-    if (getInitialCameraAction(initialFitDone, props.listings.length) === 'initial-fit') {
-      initialFitDone = true
+    const country = props.listings[0]?.country_code ?? null
+    if (country && initialFitCountry !== country) {
+      initialFitCountry = country
       fitToListings()
     }
   })
@@ -198,7 +204,7 @@ onMounted(() => {
 watch(() => props.listings, handleListingsChanged, { deep: true })
 watch(() => props.selectedId, (selectedId, previousId) => {
   const listing = props.listings.find((candidate) => candidate.id === selectedId)
-  const action = getSelectionCameraAction(previousId ?? null, selectedId, listing ? getValidCoordinates(listing) !== null : false)
+  const action = getSelectionCameraAction(previousId ?? null, selectedId, listing ? getLocationPrecision(listing) : 'UNKNOWN')
   if (action === 'selection-fly') flyToSelectedListing(selectedId)
   updateMarkerStates()
 })

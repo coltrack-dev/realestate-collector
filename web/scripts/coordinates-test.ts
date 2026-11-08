@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { getCoordinateDiagnostics, getCoordinateExtent, getValidCoordinates } from '../src/map/coordinates.ts'
+import { getCoordinateDiagnostics, getCoordinateExtent, getLocationPrecision, getNavigationTarget, getValidCoordinates } from '../src/map/coordinates.ts'
 import type { Listing } from '../src/types.ts'
 
 function listing(latitude: number | null, longitude: number | null): Listing {
@@ -8,7 +8,9 @@ function listing(latitude: number | null, longitude: number | null): Listing {
     operation: 'SALE', property_type: 'APARTMENT', price: null, currency: null, area_m2: null,
     bedrooms: null, bathrooms: null, parking_spots: null, country: 'Colombia', department: null,
     city: 'Bogotá', neighborhood: null, address: null, latitude, longitude, images: [],
-    published_at: null, collected_at: '', first_seen_at: '', last_seen_at: '',
+    published_at: null, collected_at: '', first_seen_at: '', last_seen_at: '', country_code: 'CO',
+    resolved_latitude: null, resolved_longitude: null, location_precision: 'UNKNOWN',
+    geocode_provider: '', geocoded_at: null,
   }
 }
 
@@ -25,4 +27,18 @@ assert.deepEqual(getCoordinateExtent([listing(4.65, -74.08), listing(6.2, -75.3)
   minLongitude: -75.3, minLatitude: 4.65, maxLongitude: -74.08, maxLatitude: 6.2,
 })
 assert.equal(getCoordinateExtent([listing(null, null)]), null)
+
+const cityOnly = listing(null, null)
+assert.equal(getLocationPrecision(cityOnly), 'CITY')
+assert.deepEqual(getNavigationTarget(cityOnly), { coordinate: [-74.0721, 4.7110], precision: 'CITY' })
+const uruguayCity = { ...cityOnly, country: 'Uruguay', country_code: 'UY', city: 'Montevideo' }
+assert.deepEqual(getNavigationTarget(uruguayCity), { coordinate: [-56.1645, -34.9011], precision: 'CITY' })
+const resolvedAddress = { ...uruguayCity, resolved_latitude: -34.9, resolved_longitude: -56.16, location_precision: 'ADDRESS' as const }
+assert.deepEqual(getNavigationTarget(resolvedAddress), { coordinate: [-56.16, -34.9], precision: 'ADDRESS' })
+const countryOnly = { ...cityOnly, city: null, country: 'Colombia', country_code: 'CO' }
+assert.equal(getLocationPrecision(countryOnly), 'COUNTRY')
+const noLocation = { ...cityOnly, city: null, country: null, country_code: null }
+assert.equal(getLocationPrecision(noLocation), 'UNKNOWN')
+const unknown = { ...noLocation, country_code: 'ZZ' }
+assert.equal(getLocationPrecision(unknown), 'UNKNOWN')
 console.log('coordinate tests passed')

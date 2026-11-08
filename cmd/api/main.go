@@ -13,6 +13,8 @@ import (
 
 	"github.com/example/realestate-collector/internal/api"
 	"github.com/example/realestate-collector/internal/config"
+	"github.com/example/realestate-collector/internal/sources/gallito"
+	"github.com/example/realestate-collector/internal/sources/vixora"
 	"github.com/example/realestate-collector/internal/storage/postgres"
 )
 
@@ -33,8 +35,13 @@ func main() {
 	if address == "" {
 		address = "127.0.0.1:8086"
 	}
+	repository := postgres.NewReadRepository(store)
+	details := api.NewDetailsService(repository, []api.DetailSource{
+		vixora.New(nil, settings.UserAgent, settings.Delay),
+		gallito.New(nil, settings.UserAgent, settings.Delay),
+	}, settings.DetailsTTL)
 	server := &http.Server{
-		Addr: address, Handler: api.NewServer(postgres.NewReadRepository(store)),
+		Addr: address, Handler: api.NewServer(repository, details),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,
 	}

@@ -1,0 +1,23 @@
+{
+  "id":"6aeff39935abd95ffb2166d8",
+  "title":"Venta Apto en la Blanqueada 2 dormitorios",
+  "operation":"sale",
+  "propertyType":"apartment",
+  "price":{"amount":159000,"currency":"USD"},
+  "neighbourhood":"LA BLANQUEADA",
+  "city":"MONTEVIDEO",
+  "bedrooms":2,
+  "bathrooms":2,
+  "areaM2":0,
+  "photos":["https://imagenes.gallito.com.uy/rinmu/sinblanco/7fc61fb27e32f.jpg","https://imagenes.gallito.com.uy/rinmu/sinblanco/4c8835120caee.jpg","https://imagenes.gallito.com.uy/rinmu/sinblanco/e1794643b3752.jpg","https://imagenes.gallito.com.uy/rinmu/sinblanco/7f351babedffc.jpg","https://imagenes.gallito.com.uy/rinmu/sinblanco/b3835b8d7ce13.jpg","https://imagenes.gallito.com.uy/rinmu/sinblanco/660a7b247ba6f.jpg","https://imagenes.gallito.com.uy/rinmu/sinblanco/2605dba42c8d1.jpg","https://imagenes.gallito.com.uy/rinmu/sinblanco/bd3a7db10294c.jpg"],
+  "location":{"lat":-34.88638,"lng":-56.151241},
+  "descriptionText":"IMPERDIBLE APARTAMENTO EN VENTA – LA BLANQUEADA. La propiedad cuenta con 2 dormitorios, living-comedor, cocina, patio y espacio para estacionar.",
+  "address":"Casasweb Ref:259497 La Blanqueada",
+  "province":"MONTEVIDEO",
+  "landAreaM2":10,
+  "publicRef":"EP-132657",
+  "condition":"good",
+  "rooms":3,
+  "characteristics":{"patio":true,"closets":true},
+  "url":"https://www.gallito.com.uy/venta-apartamento-la-blanqueada-montevideo-2-dormitorios-inmuebles-30104518?utm_source=mcp&utm_medium=mcp"
+}

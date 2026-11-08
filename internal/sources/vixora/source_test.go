@@ -19,6 +19,9 @@ func TestCollectParsesDocumentationFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/properties" {
+			t.Fatalf("summary collection called unexpected detail path: %s", r.URL.Path)
+		}
 		if r.URL.Query().Get("page_size") != "1" {
 			t.Fatalf("unexpected page_size: %s", r.URL.RawQuery)
 		}
@@ -38,10 +41,40 @@ func TestCollectParsesDocumentationFixture(t *testing.T) {
 	if listings[0].Latitude == nil || *listings[0].Latitude != 6.153 {
 		t.Fatalf("coordinates not parsed: %#v", listings[0])
 	}
+	if len(listings[0].Images) != 1 || listings[0].Images[0] != "https://media.example.invalid/fin-0012.jpg" {
+		t.Fatalf("summary should keep only the cover photo: %#v", listings[0].Images)
+	}
+}
+
+func TestFetchDetailsPreservesAllPhotosInOrder(t *testing.T) {
+	body, err := os.ReadFile("../../../testdata/fixtures/vixora/detail_FIN-0012.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/properties/FIN-0012" {
+			t.Fatalf("unexpected detail path: %s", r.URL.Path)
+		}
+		return jsonResponse(body), nil
+	})
+	source := Source{Client: httpclient.New(&http.Client{Transport: transport}, "test", 0), Endpoint: "https://fixture.invalid/properties"}
+	listing, err := source.FetchDetails(context.Background(), "FIN-0012")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listing.Images) != 3 || listing.Images[0] != "https://media.example.invalid/fin-0012-1.jpg" || listing.Images[2] != "https://media.example.invalid/fin-0012-3.jpg" {
+		t.Fatalf("detail photos not preserved in order: %#v", listing.Images)
+	}
 }
 
 func TestCollectStopsAtPaginationEnd(t *testing.T) {
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/properties" {
+			result := response{Data: []property{{Code: "FIN-1", URL: "https://vixora.test/1", Type: "finca", Operation: "venta"}}}
+			result.Pagination.TotalPages = 2
+			encoded, _ := json.Marshal(result)
+			return jsonResponse(encoded), nil
+		}
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 		result := response{Data: []property{{Code: "FIN-1", URL: "https://vixora.test/1", Type: "finca", Operation: "venta"}}}
 		result.Pagination.TotalPages = 2
@@ -60,15 +93,23 @@ func TestCollectStopsAtPaginationEnd(t *testing.T) {
 
 func TestLiveFixtureHasPublishedRecords(t *testing.T) {
 	body, err := os.ReadFile("../../../testdata/fixtures/vixora/live_page_1.json")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	var page response
-	if err := json.Unmarshal(body, &page); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal(body, &page); err != nil {
+		t.Fatal(err)
+	}
 	if len(page.Data) != 30 || page.Pagination.TotalPages != 1 {
 		t.Fatalf("unexpected saved live fixture: records=%d pages=%d", len(page.Data), page.Pagination.TotalPages)
 	}
 	for _, item := range page.Data {
-		if item.Status != "published" { t.Fatalf("unpublished item in live fixture: %s", item.Code) }
-		if _, err := toListing(item); err != nil { t.Fatal(err) }
+		if item.Status != "published" {
+			t.Fatalf("unpublished item in live fixture: %s", item.Code)
+		}
+		if _, err := toListing(item); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

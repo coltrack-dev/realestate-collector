@@ -12,6 +12,7 @@ import (
 	"github.com/example/realestate-collector/internal/model"
 	"github.com/example/realestate-collector/internal/normalize"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -94,13 +95,13 @@ const upsertListingQuery = `
 INSERT INTO listings(
     source_id, external_id, url, title, description, operation,
     property_type, price, currency, area_m2, bedrooms, bathrooms,
-    parking_spots, country, department, city, neighborhood, address,
+    parking_spots, country, country_code, department, city, neighborhood, address,
     latitude, longitude, images, published_at, first_seen_at,
     last_seen_at, updated_at
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-    $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $23, $23
+    $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $24, $24
 )
 ON CONFLICT(source_id, external_id) DO UPDATE SET
     url = EXCLUDED.url,
@@ -115,12 +116,48 @@ ON CONFLICT(source_id, external_id) DO UPDATE SET
     bathrooms = COALESCE(EXCLUDED.bathrooms, listings.bathrooms),
     parking_spots = COALESCE(EXCLUDED.parking_spots, listings.parking_spots),
     country = COALESCE(NULLIF(EXCLUDED.country, ''), listings.country),
+    country_code = COALESCE(NULLIF(EXCLUDED.country_code, ''), listings.country_code),
     department = COALESCE(NULLIF(EXCLUDED.department, ''), listings.department),
     city = EXCLUDED.city,
     neighborhood = EXCLUDED.neighborhood,
     address = COALESCE(NULLIF(EXCLUDED.address, ''), listings.address),
     latitude = COALESCE(EXCLUDED.latitude, listings.latitude),
     longitude = COALESCE(EXCLUDED.longitude, listings.longitude),
+    resolved_latitude = CASE WHEN
+        COALESCE(NULLIF(EXCLUDED.department, ''), listings.department) IS DISTINCT FROM listings.department OR
+        COALESCE(NULLIF(EXCLUDED.city, ''), listings.city) IS DISTINCT FROM listings.city OR
+        COALESCE(NULLIF(EXCLUDED.neighborhood, ''), listings.neighborhood) IS DISTINCT FROM listings.neighborhood OR
+        COALESCE(NULLIF(EXCLUDED.address, ''), listings.address) IS DISTINCT FROM listings.address OR
+        COALESCE(NULLIF(EXCLUDED.country_code, ''), listings.country_code) IS DISTINCT FROM listings.country_code
+        THEN NULL ELSE listings.resolved_latitude END,
+    resolved_longitude = CASE WHEN
+        COALESCE(NULLIF(EXCLUDED.department, ''), listings.department) IS DISTINCT FROM listings.department OR
+        COALESCE(NULLIF(EXCLUDED.city, ''), listings.city) IS DISTINCT FROM listings.city OR
+        COALESCE(NULLIF(EXCLUDED.neighborhood, ''), listings.neighborhood) IS DISTINCT FROM listings.neighborhood OR
+        COALESCE(NULLIF(EXCLUDED.address, ''), listings.address) IS DISTINCT FROM listings.address OR
+        COALESCE(NULLIF(EXCLUDED.country_code, ''), listings.country_code) IS DISTINCT FROM listings.country_code
+        THEN NULL ELSE listings.resolved_longitude END,
+    location_precision = CASE WHEN
+        COALESCE(NULLIF(EXCLUDED.department, ''), listings.department) IS DISTINCT FROM listings.department OR
+        COALESCE(NULLIF(EXCLUDED.city, ''), listings.city) IS DISTINCT FROM listings.city OR
+        COALESCE(NULLIF(EXCLUDED.neighborhood, ''), listings.neighborhood) IS DISTINCT FROM listings.neighborhood OR
+        COALESCE(NULLIF(EXCLUDED.address, ''), listings.address) IS DISTINCT FROM listings.address OR
+        COALESCE(NULLIF(EXCLUDED.country_code, ''), listings.country_code) IS DISTINCT FROM listings.country_code
+        THEN 'UNKNOWN' ELSE listings.location_precision END,
+    geocode_provider = CASE WHEN
+        COALESCE(NULLIF(EXCLUDED.department, ''), listings.department) IS DISTINCT FROM listings.department OR
+        COALESCE(NULLIF(EXCLUDED.city, ''), listings.city) IS DISTINCT FROM listings.city OR
+        COALESCE(NULLIF(EXCLUDED.neighborhood, ''), listings.neighborhood) IS DISTINCT FROM listings.neighborhood OR
+        COALESCE(NULLIF(EXCLUDED.address, ''), listings.address) IS DISTINCT FROM listings.address OR
+        COALESCE(NULLIF(EXCLUDED.country_code, ''), listings.country_code) IS DISTINCT FROM listings.country_code
+        THEN NULL ELSE listings.geocode_provider END,
+    geocoded_at = CASE WHEN
+        COALESCE(NULLIF(EXCLUDED.department, ''), listings.department) IS DISTINCT FROM listings.department OR
+        COALESCE(NULLIF(EXCLUDED.city, ''), listings.city) IS DISTINCT FROM listings.city OR
+        COALESCE(NULLIF(EXCLUDED.neighborhood, ''), listings.neighborhood) IS DISTINCT FROM listings.neighborhood OR
+        COALESCE(NULLIF(EXCLUDED.address, ''), listings.address) IS DISTINCT FROM listings.address OR
+        COALESCE(NULLIF(EXCLUDED.country_code, ''), listings.country_code) IS DISTINCT FROM listings.country_code
+        THEN NULL ELSE listings.geocoded_at END,
     images = EXCLUDED.images,
     published_at = EXCLUDED.published_at,
     last_seen_at = EXCLUDED.last_seen_at,
@@ -208,13 +245,108 @@ func (s *Store) Save(ctx context.Context, l model.Listing) (created, updated boo
 	if err != nil {
 		return false, false, err
 	}
+	if err = syncListingImages(ctx, tx, listingID, l.Images); err != nil {
+		return false, false, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, false, fmt.Errorf("commit listing transaction: %w", err)
 	}
 	return created, updated, nil
 }
 
+func (s *Store) SetDetailsStatus(ctx context.Context, listingID int64, status string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE listings SET details_status = $2 WHERE id = $1`, listingID, status)
+	if err != nil {
+		return fmt.Errorf("set details status for listing %d: %w", listingID, err)
+	}
+	return nil
+}
+
+// SaveGeocode stores a resolved location separately from source coordinates.
+// It never changes latitude or longitude received from the source.
+func (s *Store) SaveGeocode(ctx context.Context, listingID int64, latitude, longitude *float64, precision, provider string, geocodedAt time.Time) error {
+	_, err := s.Pool.Exec(ctx, `
+UPDATE listings
+SET resolved_latitude = $2,
+    resolved_longitude = $3,
+    location_precision = $4,
+    geocode_provider = NULLIF($5, ''),
+    geocoded_at = $6
+WHERE id = $1`, listingID, latitude, longitude, precision, provider, geocodedAt)
+	if err != nil {
+		return fmt.Errorf("save geocode for listing %d: %w", listingID, err)
+	}
+	return nil
+}
+
+func (s *Store) UpdateDetails(ctx context.Context, listingID int64, details model.Listing, fetchedAt, expiresAt time.Time) error {
+	images, err := json.Marshal(details.Images)
+	if err != nil {
+		return fmt.Errorf("encode details images for listing %d: %w", listingID, err)
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin details transaction for listing %d: %w", listingID, err)
+	}
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx, `
+UPDATE listings
+SET description = COALESCE(NULLIF($2, ''), description),
+    area_m2 = COALESCE($3, area_m2),
+    bedrooms = COALESCE($4, bedrooms),
+    bathrooms = COALESCE($5, bathrooms),
+    parking_spots = COALESCE($6, parking_spots),
+    department = COALESCE(NULLIF($7, ''), department),
+    neighborhood = COALESCE(NULLIF($8, ''), neighborhood),
+    address = COALESCE(NULLIF($9, ''), address),
+    resolved_latitude = CASE WHEN
+        COALESCE(NULLIF($7, ''), department) IS DISTINCT FROM department OR
+        COALESCE(NULLIF($8, ''), neighborhood) IS DISTINCT FROM neighborhood OR
+        COALESCE(NULLIF($9, ''), address) IS DISTINCT FROM address
+        THEN NULL ELSE resolved_latitude END,
+    resolved_longitude = CASE WHEN
+        COALESCE(NULLIF($7, ''), department) IS DISTINCT FROM department OR
+        COALESCE(NULLIF($8, ''), neighborhood) IS DISTINCT FROM neighborhood OR
+        COALESCE(NULLIF($9, ''), address) IS DISTINCT FROM address
+        THEN NULL ELSE resolved_longitude END,
+    location_precision = CASE WHEN
+        COALESCE(NULLIF($7, ''), department) IS DISTINCT FROM department OR
+        COALESCE(NULLIF($8, ''), neighborhood) IS DISTINCT FROM neighborhood OR
+        COALESCE(NULLIF($9, ''), address) IS DISTINCT FROM address
+        THEN 'UNKNOWN' ELSE location_precision END,
+    geocode_provider = CASE WHEN
+        COALESCE(NULLIF($7, ''), department) IS DISTINCT FROM department OR
+        COALESCE(NULLIF($8, ''), neighborhood) IS DISTINCT FROM neighborhood OR
+        COALESCE(NULLIF($9, ''), address) IS DISTINCT FROM address
+        THEN NULL ELSE geocode_provider END,
+    geocoded_at = CASE WHEN
+        COALESCE(NULLIF($7, ''), department) IS DISTINCT FROM department OR
+        COALESCE(NULLIF($8, ''), neighborhood) IS DISTINCT FROM neighborhood OR
+        COALESCE(NULLIF($9, ''), address) IS DISTINCT FROM address
+        THEN NULL ELSE geocoded_at END,
+    images = CASE WHEN jsonb_array_length($10::jsonb) > 0 THEN $10::jsonb ELSE images END,
+    details_fetched_at = $11,
+    details_expires_at = $12,
+    details_status = 'READY'
+WHERE id = $1`, listingID, details.Description, details.AreaM2, details.Bedrooms,
+		details.Bathrooms, details.ParkingSpots, details.Department, details.Neighborhood,
+		details.Address, images, fetchedAt, expiresAt)
+	if err != nil {
+		return fmt.Errorf("update details for listing %d: %w", listingID, err)
+	}
+	if len(details.Images) > 0 {
+		if err := syncListingImages(ctx, tx, listingID, details.Images); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit details transaction for listing %d: %w", listingID, err)
+	}
+	return nil
+}
+
 type databaseTransaction interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
@@ -242,7 +374,7 @@ func upsertListing(ctx context.Context, tx databaseTransaction, sourceID int64, 
 		listing.Description, listing.Operation, listing.PropertyType,
 		listing.Price, listing.Currency, listing.AreaM2, listing.Bedrooms,
 		listing.Bathrooms, listing.ParkingSpots, listing.Country,
-		listing.Department, listing.City, listing.Neighborhood, listing.Address,
+		listing.CountryCode, listing.Department, listing.City, listing.Neighborhood, listing.Address,
 		listing.Latitude, listing.Longitude, images, listing.PublishedAt,
 		collectedAt,
 	).Scan(&listingID, &created)
@@ -266,6 +398,23 @@ func insertSnapshot(ctx context.Context, tx databaseTransaction, listingID int64
 		return false, fmt.Errorf("insert snapshot for listing %s: %w", listing.ExternalID, err)
 	}
 	return snapshotID != 0, nil
+}
+
+func syncListingImages(ctx context.Context, tx databaseTransaction, listingID int64, urls []string) error {
+	const query = `
+INSERT INTO listing_images(listing_id, position, original_url, storage_mode, updated_at)
+VALUES ($1, $2, $3, 'EXTERNAL_URL', now())
+ON CONFLICT(listing_id, position) DO UPDATE SET
+    original_url = EXCLUDED.original_url,
+    storage_mode = 'EXTERNAL_URL',
+    updated_at = now(),
+    revoked_at = NULL`
+	for position, originalURL := range urls {
+		if _, err := tx.Exec(ctx, query, listingID, position, originalURL); err != nil {
+			return fmt.Errorf("sync image %d for listing %d: %w", position, listingID, err)
+		}
+	}
+	return nil
 }
 func ApplyMigration(ctx context.Context, p *pgxpool.Pool, path string) error {
 	b, e := os.ReadFile(path)

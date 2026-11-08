@@ -20,6 +20,7 @@ import (
 	"github.com/example/realestate-collector/internal/parser"
 	"github.com/example/realestate-collector/internal/sources/ciencuadras"
 	"github.com/example/realestate-collector/internal/sources/dccolombia"
+	"github.com/example/realestate-collector/internal/sources/gallito"
 	"github.com/example/realestate-collector/internal/sources/igac"
 	"github.com/example/realestate-collector/internal/sources/vixora"
 	"github.com/example/realestate-collector/internal/storage/postgres"
@@ -41,6 +42,8 @@ type commandOptions struct {
 	input        string
 	format       string
 	sourceName   string
+	operation    string
+	property     string
 }
 
 type collectedData struct {
@@ -87,7 +90,7 @@ func main() {
 
 func parseOptions() commandOptions {
 	options := commandOptions{}
-	flag.StringVar(&options.source, "source", "fixture", "source: fixture, file, ciencuadras, or igac-transactions")
+	flag.StringVar(&options.source, "source", "fixture", "source: fixture, file, ciencuadras, vixora, dccolombia, gallito, or igac-transactions")
 	flag.IntVar(&options.limit, "limit", 50, "maximum number of records")
 	flag.BoolVar(&options.dryRun, "dry-run", false, "parse without database writes")
 	flag.StringVar(&options.city, "city", "bogota", "city filter for live sources")
@@ -102,8 +105,8 @@ func parseOptions() commandOptions {
 	flag.StringVar(&options.input, "input", "", "local JSON or CSV file for -source=file")
 	flag.StringVar(&options.format, "format", "", "input format: json or csv; inferred from extension")
 	flag.StringVar(&options.sourceName, "source-name", "file", "source identifier for rows without source")
-	flag.String("operation", "sale", "operation filter for listing sources")
-	flag.String("property", "apartment", "property filter for listing sources")
+	flag.StringVar(&options.operation, "operation", "sale", "operation filter for listing sources")
+	flag.StringVar(&options.property, "property", "apartment", "property filter for listing sources")
 	flag.Parse()
 	return options
 }
@@ -137,11 +140,21 @@ func collect(ctx context.Context, options commandOptions) (collectedData, error)
 	case "vixora":
 		settings := config.Load()
 		source := vixora.New(nil, settings.UserAgent, settings.Delay)
+		source.Operation = options.operation
+		source.PropertyType = options.property
 		listings, err := source.Collect(ctx, options.limit)
 		return collectedData{listings: listings}, err
 	case "dccolombia":
 		settings := config.Load()
 		source := dccolombia.New(nil, settings.UserAgent, settings.Delay)
+		listings, err := source.Collect(ctx, options.limit)
+		return collectedData{listings: listings}, err
+	case "gallito":
+		settings := config.Load()
+		source := gallito.New(nil, settings.UserAgent, settings.Delay)
+		source.Operation = options.operation
+		source.City = options.city
+		source.PropertyTypes = []string{options.property}
 		listings, err := source.Collect(ctx, options.limit)
 		return collectedData{listings: listings}, err
 	case "igac-transactions":

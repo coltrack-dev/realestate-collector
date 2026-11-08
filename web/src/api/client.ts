@@ -32,6 +32,10 @@ export function fetchListing(id: number): Promise<Listing> {
   return request<Listing>(`/listings/${id}`)
 }
 
+export function refreshListingDetails(id: number, signal?: AbortSignal): Promise<Listing> {
+	return request<Listing>(`/listings/${id}/refresh-details`, { method: 'POST', signal })
+}
+
 export async function fetchHistory(id: number): Promise<Snapshot[]> {
   const response = await request<{ data: Snapshot[] }>(`/listings/${id}/history`)
   return response.data

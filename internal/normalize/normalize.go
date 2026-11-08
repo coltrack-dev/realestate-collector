@@ -94,7 +94,7 @@ func Hashable(l model.Listing) string {
 	var b strings.Builder
 	fields := []string{
 		l.Source, l.ExternalID, l.URL, l.Title, l.Description,
-		l.Operation, l.PropertyType, l.Currency, l.Country,
+		l.Operation, l.PropertyType, l.Currency, l.Country, l.CountryCode,
 		l.Department, l.City, l.Neighborhood, l.Address,
 	}
 	for _, f := range fields {
@@ -137,6 +137,9 @@ func CleanListing(l model.Listing) model.Listing {
 	l.City = City(l.City)
 	if l.Country == "" {
 		l.Country = "Colombia"
+	}
+	if l.CountryCode == "" && strings.EqualFold(l.Country, "Colombia") {
+		l.CountryCode = "CO"
 	}
 	return l
 }
