@@ -1,0 +1,33 @@
+# Real Estate Collector
+
+Go MVP for reproducible collection and change tracking of Colombian real-estate listings.
+
+The current working collector is `fixture`; it parses `testdata/fixtures/listings.json`, normalizes values and can persist them to PostgreSQL. Ciencuadras live collection is intentionally disabled because its terms expressly prohibit automated extraction. FincaRaíz remains pending permission/API confirmation; see [`docs/SOURCE_RESEARCH.md`](docs/SOURCE_RESEARCH.md).
+
+Authentication defaults to `AUTH_MODE=none`. Observed search pages were publicly viewable without registration, so the MVP contains no login flow. `AUTH_MODE=session` is reserved for a future explicitly authorized source and does not support Google OAuth, browser cookies, browser profiles or CAPTCHA automation.
+
+## First permitted live source
+
+IGAC's registered-property-transactions dataset on `datos.gov.co` is integrated as `igac-transactions`. It is public Socrata JSON data, not portal listings. Values are stored separately in `property_transactions` and must not be treated as asking prices.
+
+```bash
+go run ./cmd/collector -source=igac-transactions -divipola=11001 -limit=100 -dry-run
+```
+
+To resume after a known IGAC record, add `-after-pk=<last-pk>`. The adapter uses `$order=pk` and retains the source `pk` as the idempotency key.
+
+For database import, apply `migrations/001_init.sql` and then `migrations/002_expand_igac_transactions.sql` to the isolated Compose database, set `DATABASE_URL`, omit `-dry-run`, and use a small limit first. See [`docs/SOURCE_CANDIDATES.md`](docs/SOURCE_CANDIDATES.md) and [`docs/IGAC_DATA_ANALYSIS.md`](docs/IGAC_DATA_ANALYSIS.md).
+
+## Run
+
+```bash
+cp .env.example .env
+docker compose up -d
+/usr/local/go/bin/go mod tidy
+/usr/local/go/bin/go run ./cmd/collector -source=fixture -limit=20 -dry-run
+```
+
+Apply `migrations/001_init.sql` using an isolated Compose database before persistence. `-dry-run` never connects to PostgreSQL.
+
+The design uses `Source`, parser/normalizer, PostgreSQL upsert and content-hash snapshots. The schema guarantees `(source_id, external_id)` uniqueness and suppresses duplicate snapshots.
+# realestate-collector
