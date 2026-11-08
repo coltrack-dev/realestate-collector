@@ -1,0 +1,38 @@
+[
+  {
+    "ID": "fixture-1001",
+    "URL": "https://fixture.invalid/listing/1001?utm_source=test",
+    "Title": "Apartamento en venta en Chapinero",
+    "Description": "Apartamento luminoso con balcón.",
+    "Operation": "Venta",
+    "PropertyType": "Apartamento",
+    "Price": "$ 850.000.000",
+    "Currency": "COP",
+    "Area": "78,5 m2",
+    "City": "Bogota",
+    "Neighborhood": "Chapinero",
+    "Bedrooms": 3,
+    "Bathrooms": 2,
+    "Parking": 1,
+    "Images": [
+      "https://fixture.invalid/1001.jpg"
+    ]
+  },
+  {
+    "ID": "fixture-1002",
+    "URL": "https://fixture.invalid/listing/1002",
+    "Title": "Apartamento en venta en Usaquén",
+    "Description": "Cerca de parques y transporte.",
+    "Operation": "SALE",
+    "PropertyType": "apartment",
+    "Price": "1.200.000.000 COP",
+    "Currency": "COP",
+    "Area": "105 m²",
+    "City": "Bogotá D.C.",
+    "Neighborhood": "Usaquén",
+    "Bedrooms": 3,
+    "Bathrooms": 3,
+    "Parking": 2,
+    "Images": []
+  }
+]

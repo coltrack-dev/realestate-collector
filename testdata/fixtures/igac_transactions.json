@@ -1,0 +1,3 @@
+[
+  {"pk":"fixture-tx-1","matricula":"050-123456","numero_catastral_antiguo":"old-1","numero_catastral":"new-1","municipio":"Bogotá D.C.","departamento":"Bogotá D.C.","divipola":"11001","orip":"050","fecha_radica_texto":"2023-04-12","fecha_apertura_texto":"2001-02-03","year_radica":"2023","tipo_predio_zona":"URBANO","categoria_ruralidad_2024":"URBANO","num_anotacion":7,"estado_folio":"ACTIVO","folios_derivados":"[]","predios_nuevos":1,"tiene_mas_de_un_valor":"NO","valor":420000000,"tiene_valor":"SI","count_a":1,"count_de":1,"documento_justificativo":"ESCRITURA","cod_natujur":"125","nombre_natujur":"COMPRAVENTA","dinamica_2024":1}
+]
