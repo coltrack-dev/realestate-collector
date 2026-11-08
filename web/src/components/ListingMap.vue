@@ -3,19 +3,31 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { LngLatBounds, Map, Marker, NavigationControl, setWorkerUrl } from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
 import type { Listing } from '../types'
+import {
+  COLOMBIA_CENTER,
+  getCoordinateDiagnostics,
+  getValidCoordinates,
+  getValidListings,
+} from '../map/coordinates'
+import { getInitialCameraAction, getSelectionCameraAction } from '../map/camera'
 
 setWorkerUrl(workerUrl)
 
 const props = defineProps<{ listings: Listing[]; selectedId: number | null }>()
-const emit = defineEmits<{ select: [listing: Listing] }>()
+type SelectionSource = 'marker-click'
+const emit = defineEmits<{ select: [listing: Listing, source: SelectionSource] }>()
 const mapElement = ref<HTMLElement | null>(null)
 let map: Map | null = null
+let mapReady = false
+let initialFitDone = false
+let resizeObserver: ResizeObserver | null = null
 const markers = new globalThis.Map<number, Marker>()
 
-const mappedListings = () => props.listings.filter((listing) => listing.latitude != null && listing.longitude != null)
+const mappedListings = () => getValidListings(props.listings)
+const coordinateDiagnostics = () => getCoordinateDiagnostics(props.listings)
 
 function renderMarkers() {
-  if (!map) return
+  if (!map || !mapReady) return
   for (const marker of markers.values()) marker.remove()
   markers.clear()
   for (const listing of mappedListings()) {
@@ -24,8 +36,10 @@ function renderMarkers() {
     node.type = 'button'
     node.title = listing.title
     node.innerHTML = '<span></span>'
-    node.addEventListener('click', () => emit('select', listing))
-    const marker = new Marker({ element: node }).setLngLat([listing.longitude!, listing.latitude!]).addTo(map)
+    node.addEventListener('click', () => emit('select', listing, 'marker-click'))
+    const coordinate = getValidCoordinates(listing)
+    if (!coordinate) continue
+    const marker = new Marker({ element: node }).setLngLat(coordinate).addTo(map)
     markers.set(listing.id, marker)
   }
 }
@@ -33,29 +47,70 @@ function renderMarkers() {
 function fitToListings() {
   if (!map) return
   const available = mappedListings()
-  if (available.length === 0) return
-  if (available.length === 1) { map.flyTo({ center: [available[0].longitude!, available[0].latitude!], zoom: 12, duration: 500 }); return }
+  if (available.length === 0) {
+    map.flyTo({ center: COLOMBIA_CENTER, zoom: 5, duration: 500 })
+    return
+  }
+  const firstCoordinate = getValidCoordinates(available[0])
+  if (!firstCoordinate) return
+  if (available.length === 1) { map.flyTo({ center: firstCoordinate, zoom: 12, duration: 500 }); return }
   const bounds = new LngLatBounds()
-  available.forEach((listing) => bounds.extend([listing.longitude!, listing.latitude!]))
+  available.forEach((listing) => {
+    const coordinate = getValidCoordinates(listing)
+    if (coordinate) bounds.extend(coordinate)
+  })
   map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 500 })
+}
+
+function flyToSelectedListing(selectedId: number | null) {
+  if (!map || !mapReady || selectedId == null) return
+  const listing = props.listings.find((candidate) => candidate.id === selectedId)
+  const coordinate = listing ? getValidCoordinates(listing) : null
+  if (!coordinate) return
+  map.flyTo({ center: coordinate, zoom: 12, duration: 500 })
+}
+
+function handleListingsChanged() {
+  if (!mapReady) return
+  renderMarkers()
+  if (getInitialCameraAction(initialFitDone, props.listings.length) !== 'initial-fit') return
+  initialFitDone = true
+  fitToListings()
 }
 
 onMounted(() => {
   if (!mapElement.value) return
-  map = new Map({ container: mapElement.value, style: 'https://demotiles.maplibre.org/style.json', center: [-74.08, 4.65], zoom: 5 })
+  map = new Map({ container: mapElement.value, style: 'https://tiles.openfreemap.org/styles/liberty', center: COLOMBIA_CENTER, zoom: 5 })
+  resizeObserver = new ResizeObserver(() => map?.resize())
+  resizeObserver.observe(mapElement.value)
   map.addControl(new NavigationControl({ showCompass: false }), 'top-right')
-  map.on('load', () => { renderMarkers(); fitToListings() })
+  map.on('load', () => {
+    mapReady = true
+    map?.resize()
+    renderMarkers()
+    if (getInitialCameraAction(initialFitDone, props.listings.length) === 'initial-fit') {
+      initialFitDone = true
+      fitToListings()
+    }
+  })
 })
 
-watch(() => [props.listings, props.selectedId], () => { renderMarkers(); fitToListings() }, { deep: true })
-onBeforeUnmount(() => { map?.remove(); map = null })
+watch(() => props.listings, handleListingsChanged, { deep: true })
+watch(() => props.selectedId, (selectedId, previousId) => {
+  const listing = props.listings.find((candidate) => candidate.id === selectedId)
+  const action = getSelectionCameraAction(previousId ?? null, selectedId, listing ? getValidCoordinates(listing) !== null : false)
+  if (action === 'selection-fly') flyToSelectedListing(selectedId)
+  renderMarkers()
+})
+onBeforeUnmount(() => { resizeObserver?.disconnect(); resizeObserver = null; map?.remove(); map = null; mapReady = false })
 </script>
 
 <template>
   <section class="map-shell">
     <div ref="mapElement" class="map-canvas"></div>
-    <div class="map-legend"><span class="legend-dot"></span>{{ mappedListings().length }} ubicados en el mapa</div>
-    <div v-if="mappedListings().length < listings.length" class="map-note">{{ listings.length - mappedListings().length }} sin coordenadas exactas</div>
+    <div class="map-legend"><span class="legend-dot"></span>{{ coordinateDiagnostics().withCoordinates }} ubicados en el mapa</div>
+    <div v-if="coordinateDiagnostics().withoutCoordinates" class="map-note">{{ coordinateDiagnostics().withoutCoordinates }} sin coordenadas exactas</div>
+    <div v-if="coordinateDiagnostics().invalidCoordinates" class="map-note">{{ coordinateDiagnostics().invalidCoordinates }} con coordenadas no válidas</div>
     <div v-if="!listings.length" class="map-empty"><span>⌖</span><strong>El mapa espera resultados</strong><small>Prueba con otros filtros</small></div>
   </section>
 </template>

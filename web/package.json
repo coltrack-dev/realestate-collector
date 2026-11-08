@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:coordinates": "node --experimental-strip-types scripts/coordinates-test.ts",
+    "test:camera": "node --experimental-strip-types scripts/camera-test.ts"
   },
   "dependencies": {
     "maplibre-gl": "^6.4.1",

@@ -8,6 +8,7 @@ const emit = defineEmits<{ close: [] }>()
 const history = ref<Snapshot[]>([])
 const loading = ref(false)
 const error = ref('')
+const imageFailed = ref(false)
 
 const money = (value: number | null, currency: string | null) => value == null ? 'Sin precio' : new Intl.NumberFormat('es-CO', { style: 'currency', currency: currency || 'COP', maximumFractionDigits: 0 }).format(value)
 const date = (value: string | null) => value ? new Intl.DateTimeFormat('es-CO', { dateStyle: 'medium' }).format(new Date(value)) : '—'
@@ -19,13 +20,14 @@ async function loadHistory() {
   try { history.value = await fetchHistory(props.listing.id) } catch (caught) { error.value = caught instanceof Error ? caught.message : 'No se pudo cargar el historial' } finally { loading.value = false }
 }
 watch(() => props.listing?.id, loadHistory)
+watch(() => props.listing?.images?.[0], () => { imageFailed.value = false })
 onMounted(loadHistory)
 </script>
 
 <template>
   <aside v-if="current" class="detail-drawer">
     <button class="close-button" type="button" aria-label="Cerrar detalle" @click="emit('close')">×</button>
-    <div v-if="current.images?.length" class="detail-gallery"><img :src="resolveImageUrl(current.images[0])" :alt="current.title" /></div>
+    <div v-if="current.images?.length && !imageFailed" class="detail-gallery"><img :src="resolveImageUrl(current.images[0])" :alt="current.title" @error="imageFailed = true" /></div>
     <div class="detail-body">
       <span class="eyebrow">{{ current.source }} · {{ current.external_id }}</span>
       <h2>{{ current.title }}</h2>
