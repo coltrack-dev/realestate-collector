@@ -47,6 +47,10 @@ MCP использует ранжирование портала, а не ста
 полным экспортом 12,223 записей. Удаление из одного обхода не трактуется как
 продажа объекта.
 
+В live MCP response присутствовали `ratelimit: limit=300, remaining=299,
+reset=60` и указание, что каждый assistant search расходует daily quota. Эти
+значения не заменяют письменное разрешение на фоновый массовый импорт.
+
 ## Fixtures
 
 - `testdata/fixtures/gallito/search_montevideo_sale_apartment.json` — сохранённый

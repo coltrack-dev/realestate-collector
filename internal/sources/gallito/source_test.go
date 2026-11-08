@@ -118,6 +118,37 @@ func TestCollectUsesMoreResultsPagination(t *testing.T) {
 	}
 }
 
+func TestCollectJobsDeduplicatesAndPersistsProgress(t *testing.T) {
+	body, err := os.ReadFile("../../../testdata/fixtures/gallito/search_montevideo_sale_apartment.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) { return rpcResponse(body), nil })
+	source := Source{HTTP: &http.Client{Transport: transport}, Endpoint: "https://fixture.invalid/mcp", UserAgent: "test"}
+	progress := &Progress{}
+	hooks := 0
+	source.ProgressHook = func(value *Progress) error {
+		hooks++
+		if value.Jobs == nil {
+			t.Fatal("missing jobs progress")
+		}
+		return nil
+	}
+	listings, stats, err := source.CollectJobs(context.Background(), []SearchJob{
+		{Region: "Montevideo", City: "Montevideo", Operation: "sale", PropertyType: "apartment"},
+		{Region: "Pocitos", City: "Montevideo", Operation: "sale", PropertyType: "apartment"},
+	}, 20, 1, progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listings) != 10 || len(stats) != 2 || stats[1].Duplicates != 10 {
+		t.Fatalf("listings=%d stats=%#v", len(listings), stats)
+	}
+	if hooks != 2 || len(progress.SeenIDs) != 10 {
+		t.Fatalf("hooks=%d seen=%d", hooks, len(progress.SeenIDs))
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }

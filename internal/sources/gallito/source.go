@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +28,36 @@ type Source struct {
 	Department    string
 	Operation     string
 	PropertyTypes []string
+	ProgressHook  func(*Progress) error
 
 	limiter *rateLimiter
+}
+
+type SearchJob struct {
+	Region       string
+	City         string
+	Department   string
+	Operation    string
+	PropertyType string
+}
+
+type JobProgress struct {
+	SearchID string `json:"search_id"`
+	Page     int    `json:"page"`
+}
+
+type Progress struct {
+	Jobs    map[string]JobProgress `json:"jobs"`
+	SeenIDs map[string]bool        `json:"seen_ids"`
+}
+
+type JobStats struct {
+	Job              SearchJob
+	PagesFetched     int
+	ListingsFound    int
+	ListingsAccepted int
+	Duplicates       int
+	LastPage         int
 }
 
 type rateLimiter struct {
@@ -134,32 +164,144 @@ func (s Source) Collect(ctx context.Context, limit int) ([]model.Listing, error)
 	if s.HTTP == nil {
 		s.HTTP = &http.Client{Timeout: 30 * time.Second}
 	}
-	arguments := searchArguments{Operation: s.Operation, City: s.City, Department: s.Department,
-		PropertyTypes: s.PropertyTypes, IncludeProjects: false, IncludeListings: true, Sort: "newest", Language: "es"}
-	var page searchResponse
-	if err := s.call(ctx, "search_listings", arguments, &page); err != nil {
-		return nil, err
+	jobs := []SearchJob{{City: s.City, Operation: s.Operation}}
+	if len(s.PropertyTypes) > 0 {
+		jobs[0].PropertyType = s.PropertyTypes[0]
+	}
+	listings, _, err := s.CollectJobs(ctx, jobs, limit, 10, nil)
+	return listings, err
+}
+
+// CollectJobs runs separate public searches and deduplicates listing IDs across
+// them. It never calls get_listing; details remain lazy.
+func (s Source) CollectJobs(ctx context.Context, jobs []SearchJob, limit, maxPages int, progress *Progress) ([]model.Listing, []JobStats, error) {
+	if limit <= 0 {
+		return nil, nil, fmt.Errorf("limit must be greater than zero")
+	}
+	if maxPages <= 0 || maxPages > 10 {
+		maxPages = 10
+	}
+	if progress == nil {
+		progress = &Progress{}
+	}
+	if progress.Jobs == nil {
+		progress.Jobs = make(map[string]JobProgress)
+	}
+	if progress.SeenIDs == nil {
+		progress.SeenIDs = make(map[string]bool)
 	}
 	listings := make([]model.Listing, 0, min(limit, 100))
-	for currentPage := 1; ; currentPage++ {
-		for _, item := range page.Listings {
-			listing, err := toListing(item)
-			if err != nil {
-				continue
-			}
-			listings = append(listings, listing)
-			if len(listings) == limit {
-				return listings, nil
-			}
-		}
-		if page.SearchID == "" || currentPage >= page.TotalPages || currentPage >= 10 {
+	stats := make([]JobStats, 0, len(jobs))
+	for _, job := range jobs {
+		if len(listings) >= limit {
 			break
 		}
-		if err := s.call(ctx, "more_results", moreResultsArguments{SearchID: page.SearchID, Page: currentPage + 1}, &page); err != nil {
-			return nil, err
+		jobStat := JobStats{Job: job}
+		key := jobKey(job)
+		state := progress.Jobs[key]
+		if state.Page >= maxPages {
+			continue
 		}
+		var page searchResponse
+		if state.SearchID != "" && state.Page > 0 {
+			if err := s.call(ctx, "more_results", moreResultsArguments{SearchID: state.SearchID, Page: state.Page + 1}, &page); err != nil {
+				return listings, stats, fmt.Errorf("resume Gallito job %s: %w", key, err)
+			}
+		} else {
+			arguments := searchArguments{Operation: job.Operation, City: job.City, Department: job.Department,
+				PropertyTypes: nonEmpty(job.PropertyType), IncludeProjects: false, IncludeListings: true, Sort: "newest", Language: "es"}
+			if err := s.call(ctx, "search_listings", arguments, &page); err != nil {
+				return listings, stats, fmt.Errorf("start Gallito job %s: %w", key, err)
+			}
+		}
+		for pageNumber := pageNumber(page, state); pageNumber <= maxPages && len(listings) < limit; pageNumber++ {
+			jobStat.PagesFetched++
+			jobStat.LastPage = pageNumber
+			jobStat.ListingsFound += len(page.Listings)
+			for _, item := range page.Listings {
+				if progress.SeenIDs[item.ID] {
+					jobStat.Duplicates++
+					continue
+				}
+				listing, err := toListing(item)
+				if err != nil {
+					continue
+				}
+				progress.SeenIDs[item.ID] = true
+				listings = append(listings, listing)
+				jobStat.ListingsAccepted++
+				if len(listings) == limit {
+					break
+				}
+			}
+			progress.Jobs[key] = JobProgress{SearchID: page.SearchID, Page: pageNumber}
+			if s.ProgressHook != nil {
+				if err := s.ProgressHook(progress); err != nil {
+					return listings, stats, err
+				}
+			}
+			if page.SearchID == "" || pageNumber >= page.TotalPages || pageNumber >= maxPages || len(listings) >= limit {
+				break
+			}
+			if err := s.call(ctx, "more_results", moreResultsArguments{SearchID: page.SearchID, Page: pageNumber + 1}, &page); err != nil {
+				return listings, stats, fmt.Errorf("page Gallito job %s: %w", key, err)
+			}
+		}
+		stats = append(stats, jobStat)
 	}
-	return listings, nil
+	return listings, stats, nil
+}
+
+func pageNumber(page searchResponse, previous JobProgress) int {
+	if page.Page > 0 {
+		return page.Page
+	}
+	if previous.Page > 0 {
+		return previous.Page + 1
+	}
+	return 1
+}
+
+func jobKey(job SearchJob) string {
+	return strings.Join([]string{job.Region, job.City, job.Department, job.Operation, job.PropertyType}, "|")
+}
+func nonEmpty(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return []string{value}
+}
+
+func LoadProgress(path string) (*Progress, error) {
+	if path == "" {
+		return &Progress{Jobs: map[string]JobProgress{}, SeenIDs: map[string]bool{}}, nil
+	}
+	body, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &Progress{Jobs: map[string]JobProgress{}, SeenIDs: map[string]bool{}}, nil
+		}
+		return nil, fmt.Errorf("read Gallito progress: %w", err)
+	}
+	var progress Progress
+	if err := json.Unmarshal(body, &progress); err != nil {
+		return nil, fmt.Errorf("decode Gallito progress: %w", err)
+	}
+	return &progress, nil
+}
+
+func SaveProgress(path string, progress *Progress) error {
+	if path == "" || progress == nil {
+		return nil
+	}
+	body, err := json.MarshalIndent(progress, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode Gallito progress: %w", err)
+	}
+	if err := os.WriteFile(filepath.Clean(path), append(body, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write Gallito progress: %w", err)
+	}
+	return nil
 }
 
 func (s Source) FetchDetails(ctx context.Context, externalID string) (model.Listing, error) {

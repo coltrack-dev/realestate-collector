@@ -32,6 +32,8 @@ coverage/
 *.tmp
 *.swp
 *~
+*-progress.json
+var/
 
 # IDE
 .idea/

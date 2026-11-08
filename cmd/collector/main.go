@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -44,6 +45,12 @@ type commandOptions struct {
 	sourceName   string
 	operation    string
 	property     string
+	country      string
+	maxListings  int
+	maxPages     int
+	resume       bool
+	region       string
+	progressFile string
 }
 
 type collectedData struct {
@@ -107,6 +114,12 @@ func parseOptions() commandOptions {
 	flag.StringVar(&options.sourceName, "source-name", "file", "source identifier for rows without source")
 	flag.StringVar(&options.operation, "operation", "sale", "operation filter for listing sources")
 	flag.StringVar(&options.property, "property", "apartment", "property filter for listing sources")
+	flag.StringVar(&options.country, "country", "", "country code, for example UY")
+	flag.IntVar(&options.maxListings, "max-listings", 0, "global maximum for multi-job live imports; defaults to -limit")
+	flag.IntVar(&options.maxPages, "max-pages", 10, "maximum pages per search job")
+	flag.BoolVar(&options.resume, "resume", false, "resume Gallito jobs from the progress file")
+	flag.StringVar(&options.region, "region", "", "Gallito region or comma-separated regions")
+	flag.StringVar(&options.progressFile, "progress-file", "var/gallito-progress.json", "Gallito progress file")
 	flag.Parse()
 	return options
 }
@@ -150,12 +163,46 @@ func collect(ctx context.Context, options commandOptions) (collectedData, error)
 		listings, err := source.Collect(ctx, options.limit)
 		return collectedData{listings: listings}, err
 	case "gallito":
+		if options.country != "" && strings.ToUpper(options.country) != "UY" {
+			return collectedData{}, fmt.Errorf("gallito source supports only -country=UY")
+		}
 		settings := config.Load()
 		source := gallito.New(nil, settings.UserAgent, settings.Delay)
-		source.Operation = options.operation
-		source.City = options.city
-		source.PropertyTypes = []string{options.property}
-		listings, err := source.Collect(ctx, options.limit)
+		maxListings := options.maxListings
+		if maxListings <= 0 {
+			maxListings = options.limit
+		}
+		if options.maxPages <= 0 {
+			return collectedData{}, fmt.Errorf("max-pages must be greater than zero")
+		}
+		jobs := gallitoJobs(options.region, options.operation, options.property)
+		if len(jobs) == 0 {
+			return collectedData{}, fmt.Errorf("no valid Gallito search jobs for region=%q", options.region)
+		}
+		progress := &gallito.Progress{}
+		progressPath := ""
+		if options.resume {
+			progressPath = options.progressFile
+			loaded, progressErr := gallito.LoadProgress(progressPath)
+			if progressErr != nil {
+				return collectedData{}, progressErr
+			}
+			progress = loaded
+		}
+		if options.resume || options.progressFile != "" {
+			progressPath = options.progressFile
+			if directory := filepath.Dir(progressPath); directory != "." {
+				_ = os.MkdirAll(directory, 0o700)
+			}
+			source.ProgressHook = func(value *gallito.Progress) error { return gallito.SaveProgress(progressPath, value) }
+		}
+		listings, jobStats, err := source.CollectJobs(ctx, jobs, maxListings, options.maxPages, progress)
+		for _, jobStat := range jobStats {
+			slog.Info("Gallito import progress", "region", jobStat.Job.Region, "city", jobStat.Job.City,
+				"operation", jobStat.Job.Operation, "property_type", jobStat.Job.PropertyType,
+				"pages", jobStat.PagesFetched, "found", jobStat.ListingsFound,
+				"accepted", jobStat.ListingsAccepted, "duplicates", jobStat.Duplicates, "last_page", jobStat.LastPage)
+		}
 		return collectedData{listings: listings}, err
 	case "igac-transactions":
 		settings := config.Load()
@@ -180,6 +227,56 @@ func collect(ctx context.Context, options commandOptions) (collectedData, error)
 	default:
 		return collectedData{}, fmt.Errorf("unknown source %q", options.source)
 	}
+}
+
+func gallitoJobs(regionValue, operationsValue, propertiesValue string) []gallito.SearchJob {
+	regions := map[string]gallito.SearchJob{
+		"Montevideo":             {Region: "Montevideo", City: "Montevideo"},
+		"Maldonado":              {Region: "Maldonado", City: "Maldonado", Department: "Maldonado"},
+		"Punta del Este":         {Region: "Punta del Este", City: "Punta del Este", Department: "Maldonado"},
+		"Canelones":              {Region: "Canelones", City: "Canelones", Department: "Canelones"},
+		"Ciudad de la Costa":     {Region: "Ciudad de la Costa", City: "Ciudad de la Costa", Department: "Canelones"},
+		"Colonia del Sacramento": {Region: "Colonia del Sacramento", City: "Colonia del Sacramento", Department: "Colonia"},
+		"Piriápolis":             {Region: "Piriápolis", City: "Piriápolis", Department: "Maldonado"},
+	}
+	selectedRegions := make([]string, 0)
+	if strings.TrimSpace(regionValue) == "" {
+		for name := range regions {
+			selectedRegions = append(selectedRegions, name)
+		}
+		sort.Strings(selectedRegions)
+	} else {
+		for _, name := range strings.Split(regionValue, ",") {
+			name = strings.TrimSpace(name)
+			if _, ok := regions[name]; ok {
+				selectedRegions = append(selectedRegions, name)
+			}
+		}
+	}
+	operations := splitNonEmpty(operationsValue)
+	properties := splitNonEmpty(propertiesValue)
+	jobs := make([]gallito.SearchJob, 0, len(selectedRegions)*len(operations)*len(properties))
+	for _, region := range selectedRegions {
+		base := regions[region]
+		for _, operation := range operations {
+			for _, property := range properties {
+				job := base
+				job.Operation, job.PropertyType = operation, property
+				jobs = append(jobs, job)
+			}
+		}
+	}
+	return jobs
+}
+
+func splitNonEmpty(value string) []string {
+	result := make([]string, 0)
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 func runIGACImport(ctx context.Context, options commandOptions) error {

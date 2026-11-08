@@ -140,6 +140,11 @@ go run ./cmd/collector \
   -property=apartment -limit=20 -dry-run
 ```
 
+Для подготовленного multi-job режима доступны `-country=UY`,
+`-max-listings`, `-max-pages`, `-region`, `-resume` и
+`-progress-file`. Он не запускается автоматически и предназначен для работы
+после подтверждения лимитов и условий хранения источника.
+
 Apply `migrations/005_listing_country_code.sql` and
 `migrations/006_backfill_country_code.sql` manually before importing Uruguay.
 The adapter stores `country_code=UY`, preserves USD/UYU without conversion,
