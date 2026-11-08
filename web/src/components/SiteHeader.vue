@@ -10,8 +10,9 @@ defineProps<{ total: number }>()
     </a>
 
     <nav class="site-nav" aria-label="Navegación principal">
-      <a class="site-nav-link is-active" href="#catalogo">Inventario</a>
+      <a class="site-nav-link is-active" href="#catalogo">Propiedades</a>
       <a class="site-nav-link" href="#mapa">Mapa</a>
+      <a class="site-nav-link" href="#estadisticas">Estadísticas</a>
     </nav>
 
     <div class="site-context">

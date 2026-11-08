@@ -17,6 +17,7 @@ const loading = ref(true)
 const error = ref('')
 const hasMore = ref(false)
 const listingScroll = ref<HTMLElement | null>(null)
+const mobileView = ref<'list' | 'map'>('list')
 
 const selected = computed(() => listings.value.find((listing) => listing.id === selectedListingId.value) ?? null)
 const locatedCount = computed(() => listings.value.filter((listing) => getValidCoordinates(listing) !== null).length)
@@ -58,10 +59,14 @@ onMounted(() => { void loadListings(); void loadStats() })
   <div class="app-shell">
     <SiteHeader :total="totalLabel" />
 
-    <main class="workspace">
-      <aside class="sidebar"><FilterBar @apply="applyFilters" @reset="resetFilters" /><div class="sidebar-note"><span>✦</span><p>Precios y disponibilidad corresponden al último registro de cada fuente.</p></div></aside>
+    <main class="workspace" :class="`mobile-view-${mobileView}`">
+      <div class="mobile-view-toggle" role="tablist" aria-label="Cambiar vista">
+        <button type="button" :class="{ active: mobileView === 'list' }" role="tab" :aria-selected="mobileView === 'list'" @click="mobileView = 'list'">Propiedades</button>
+        <button type="button" :class="{ active: mobileView === 'map' }" role="tab" :aria-selected="mobileView === 'map'" @click="mobileView = 'map'">Mapa</button>
+      </div>
       <section id="catalogo" class="catalog-column">
-        <div class="catalog-header"><div><span class="eyebrow">Explorar inventario</span><h1>Propiedades que <em>encajan</em> contigo</h1></div><div class="catalog-summary"><strong>{{ listings.length }}</strong><span>resultados<br />en esta vista</span></div></div>
+        <div class="catalog-header"><div><span class="eyebrow">Inventario de Colombia</span><h1>Propiedades para <em>explorar</em></h1></div><div id="estadisticas" class="catalog-summary"><strong>{{ listings.length }}</strong><span>resultados<br />en esta vista</span></div></div>
+        <FilterBar @apply="applyFilters" @reset="resetFilters" />
         <div class="active-filters"><span v-if="filters.city" class="filter-chip">{{ filters.city }} <button type="button" @click="applyFilters({ ...filters, city: '' })">×</button></span><span v-if="filters.operation" class="filter-chip">{{ filters.operation === 'SALE' ? 'Venta' : 'Arriendo' }} <button type="button" @click="applyFilters({ ...filters, operation: '' })">×</button></span><span v-if="filters.property_type" class="filter-chip">{{ filters.property_type }} <button type="button" @click="applyFilters({ ...filters, property_type: '' })">×</button></span></div>
         <div v-if="loading" class="state-panel"><div class="loader"></div><strong>Buscando propiedades</strong><span>Consultando el inventario real…</span></div>
         <div v-else-if="error" class="state-panel error-state"><span class="state-icon">!</span><strong>No pudimos cargar el catálogo</strong><span>{{ error }}</span><button class="secondary-button" type="button" @click="loadListings()">Reintentar</button></div>
