@@ -108,7 +108,7 @@ Start the local API with the isolated database configured in `DATABASE_URL`:
 go run ./cmd/api
 ```
 
-It listens on `127.0.0.1:8080` by default. Available endpoints:
+It listens on `127.0.0.1:8086` by default. Available endpoints:
 
 ```text
 GET /health
@@ -120,4 +120,15 @@ GET /api/v1/stats
 
 The API is read-only, uses parameterized PostgreSQL queries, applies filters in
 PostgreSQL, and caps pages at 100 records. It does not expose contact details.
+
+## Web UI
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Vite listens on `127.0.0.1:5173` and proxies `/api` and `/health` to the API at
+`127.0.0.1:8086`.
 # realestate-collector

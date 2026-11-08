@@ -26,7 +26,7 @@ SELECT l.id, ds.name, l.external_id, l.url, l.title, l.description,
        l.operation, l.property_type, l.price, l.currency, l.area_m2,
        l.bedrooms, l.bathrooms, l.parking_spots, l.country, l.department,
        l.city, l.neighborhood, l.address, l.latitude, l.longitude, l.images,
-       l.published_at, l.last_seen_at, count(*) OVER() AS total_count
+       l.published_at, l.first_seen_at, l.last_seen_at, count(*) OVER() AS total_count
 FROM listings l
 JOIN data_sources ds ON ds.id = l.source_id
 %s
@@ -53,7 +53,7 @@ SELECT l.id, ds.name, l.external_id, l.url, l.title, l.description,
        l.operation, l.property_type, l.price, l.currency, l.area_m2,
        l.bedrooms, l.bathrooms, l.parking_spots, l.country, l.department,
        l.city, l.neighborhood, l.address, l.latitude, l.longitude, l.images,
-       l.published_at, l.last_seen_at, 1::bigint
+       l.published_at, l.first_seen_at, l.last_seen_at, 1::bigint
 FROM listings l
 JOIN data_sources ds ON ds.id = l.source_id
 WHERE l.id = $1`, id)
@@ -130,6 +130,7 @@ func scanListing(rows listingRows) (api.ListingRecord, int64, error) {
 	var record api.ListingRecord
 	var images []byte
 	var lastSeen time.Time
+	var firstSeen time.Time
 	var total int64
 	var currency, country, department, city, neighborhood, address *string
 	err := rows.Scan(
@@ -140,7 +141,7 @@ func scanListing(rows listingRows) (api.ListingRecord, int64, error) {
 		&record.Listing.ParkingSpots, &country, &department,
 		&city, &neighborhood, &address,
 		&record.Listing.Latitude, &record.Listing.Longitude, &images, &record.Listing.PublishedAt,
-		&lastSeen, &total,
+		&firstSeen, &lastSeen, &total,
 	)
 	if err != nil { return api.ListingRecord{}, 0, err }
 	if currency != nil { record.Listing.Currency = *currency }
@@ -150,6 +151,8 @@ func scanListing(rows listingRows) (api.ListingRecord, int64, error) {
 	if neighborhood != nil { record.Listing.Neighborhood = *neighborhood }
 	if address != nil { record.Listing.Address = *address }
 	record.Listing.CollectedAt = lastSeen
+	record.FirstSeenAt = firstSeen
+	record.LastSeenAt = lastSeen
 	if len(images) > 0 && string(images) != "null" {
 		if err := json.Unmarshal(images, &record.Listing.Images); err != nil { return api.ListingRecord{}, 0, fmt.Errorf("decode images: %w", err) }
 	}

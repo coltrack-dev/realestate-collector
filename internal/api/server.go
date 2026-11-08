@@ -38,8 +38,10 @@ type Snapshot struct {
 }
 
 type ListingRecord struct {
-	ID      int64
-	Listing model.Listing
+	ID          int64
+	Listing     model.Listing
+	FirstSeenAt time.Time
+	LastSeenAt  time.Time
 }
 
 type Stats struct {
@@ -227,12 +229,14 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 }
 
 type listingJSON struct {
-	ID int64 `json:"id"`
+	ID          int64     `json:"id"`
+	FirstSeenAt time.Time `json:"first_seen_at"`
+	LastSeenAt  time.Time `json:"last_seen_at"`
 	model.Listing
 }
 
 func listingResponse(record ListingRecord) listingJSON {
-	return listingJSON{ID: record.ID, Listing: record.Listing}
+	return listingJSON{ID: record.ID, FirstSeenAt: record.FirstSeenAt, LastSeenAt: record.LastSeenAt, Listing: record.Listing}
 }
 
 func listingResponses(records []ListingRecord) []listingJSON {

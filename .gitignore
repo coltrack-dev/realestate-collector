@@ -45,3 +45,10 @@ Thumbs.db
 # Local development overrides
 compose.override.yaml
 docker-compose.override.yml
+
+# Vue/Vite frontend dependencies and build artifacts
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
