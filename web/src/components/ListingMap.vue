@@ -8,12 +8,9 @@ import {
   COLOMBIA_CENTER,
   URUGUAY_CENTER,
   getCoordinateDiagnostics,
-  getLocationPrecision,
-  getNavigationTarget,
   getValidCoordinates,
   getValidListings,
 } from '../map/coordinates'
-import { getSelectionCameraAction, zoomForPrecision } from '../map/camera'
 
 setWorkerUrl(workerUrl)
 
@@ -113,7 +110,7 @@ function showPopup(listing: Listing): void {
   const coordinate = getValidCoordinates(listing)
   if (!coordinate) return
   cancelPopupHide()
-  popup ??= new Popup({ closeButton: false, closeOnClick: false, maxWidth: '280px', offset: 16 })
+  popup ??= new Popup({ closeButton: false, closeOnClick: false, autoPan: false, maxWidth: '280px', offset: 16 })
   popup.setDOMContent(createPopupContent(listing)).setLngLat(coordinate).addTo(map)
   bindPopupHover()
 }
@@ -168,15 +165,6 @@ function fitToListings() {
   map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 500 })
 }
 
-function flyToSelectedListing(selectedId: number | null) {
-  if (!map || !mapReady || selectedId == null) return
-  const listing = props.listings.find((candidate) => candidate.id === selectedId)
-  const target = listing ? getNavigationTarget(listing) : null
-  if (!target) return
-  programmaticCameraChange = true
-  map.flyTo({ center: target.coordinate, zoom: zoomForPrecision(target.precision), duration: 500 })
-}
-
 function updateMarkerStates(): void {
   for (const [listingId, marker] of markers) {
     marker.getElement().classList.toggle('active', listingId === props.selectedId)
@@ -199,6 +187,16 @@ function emitUserViewport(): void {
   })
 }
 
+function publishCameraState(): void {
+  if (!map || !import.meta.env.DEV) return
+  mapElement.value?.setAttribute('data-camera-state', JSON.stringify({
+    center: [map.getCenter().lng, map.getCenter().lat],
+    zoom: map.getZoom(),
+    bearing: map.getBearing(),
+    pitch: map.getPitch(),
+  }))
+}
+
 function handleListingsChanged() {
   if (!mapReady) return
   renderMarkers()
@@ -211,13 +209,20 @@ function handleListingsChanged() {
 onMounted(() => {
   if (!mapElement.value) return
   map = new Map({ container: mapElement.value, style: 'https://tiles.openfreemap.org/styles/liberty', center: COLOMBIA_CENTER, zoom: 5 })
+  if (import.meta.env.DEV) {
+    ;(window as typeof window & { __listingMapForTests?: Map }).__listingMapForTests = map
+  }
   resizeObserver = new ResizeObserver(() => map?.resize())
   resizeObserver.observe(mapElement.value)
   map.addControl(new NavigationControl({ showCompass: false }), 'top-right')
-  map.on('moveend', emitUserViewport)
+  map.on('moveend', () => {
+    publishCameraState()
+    emitUserViewport()
+  })
   map.on('load', () => {
     mapReady = true
     map?.resize()
+    publishCameraState()
     renderMarkers()
     const country = props.listings[0]?.country_code ?? null
     if (country && initialFitCountry !== country) {
@@ -228,10 +233,7 @@ onMounted(() => {
 })
 
 watch(() => props.listings, handleListingsChanged, { deep: true })
-watch(() => props.selectedId, (selectedId, previousId) => {
-  const listing = props.listings.find((candidate) => candidate.id === selectedId)
-  const action = getSelectionCameraAction(previousId ?? null, selectedId, listing ? getLocationPrecision(listing) : 'UNKNOWN')
-  if (action === 'selection-fly') flyToSelectedListing(selectedId)
+watch(() => props.selectedId, () => {
   updateMarkerStates()
 })
 onBeforeUnmount(() => {
@@ -244,6 +246,7 @@ onBeforeUnmount(() => {
   programmaticCameraChange = false
   map?.remove()
   map = null
+  if (import.meta.env.DEV) delete (window as typeof window & { __listingMapForTests?: Map }).__listingMapForTests
   mapReady = false
 })
 </script>
