@@ -47,6 +47,7 @@ export interface Snapshot {
 
 export interface ListingsResponse {
   data: Listing[]
+  complete: boolean
   pagination: { limit: number; offset: number; total: number }
 }
 

@@ -112,6 +112,7 @@ func (s *Server) listings(writer http.ResponseWriter, request *http.Request) {
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"data":       listingResponses(listings),
+		"complete":   filter.Offset+len(listings) >= int(total),
 		"pagination": map[string]int{"limit": filter.Limit, "offset": filter.Offset, "total": int(total)},
 	})
 }

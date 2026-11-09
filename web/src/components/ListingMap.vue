@@ -30,6 +30,7 @@ let popup: Popup | null = null
 let popupHideTimer: ReturnType<typeof setTimeout> | null = null
 let popupHoverBound = false
 let userCameraChange = false
+let programmaticCameraChange = false
 const markers = new globalThis.Map<number, Marker>()
 
 const mappedListings = () => getValidListings(props.listings)
@@ -145,6 +146,7 @@ function renderMarkers() {
 
 function fitToListings() {
   if (!map) return
+  programmaticCameraChange = true
   const available = mappedListings()
   if (available.length === 0) {
     const center = props.listings[0]?.country_code === 'UY' ? URUGUAY_CENTER : COLOMBIA_CENTER
@@ -167,6 +169,7 @@ function flyToSelectedListing(selectedId: number | null) {
   const listing = props.listings.find((candidate) => candidate.id === selectedId)
   const target = listing ? getNavigationTarget(listing) : null
   if (!target) return
+  programmaticCameraChange = true
   map.flyTo({ center: target.coordinate, zoom: zoomForPrecision(target.precision), duration: 500 })
 }
 
@@ -181,6 +184,11 @@ function markUserCameraChange(): void {
 }
 
 function emitUserViewport(): void {
+  if (programmaticCameraChange) {
+    programmaticCameraChange = false
+    userCameraChange = false
+    return
+  }
   if (!map || !userCameraChange) return
   userCameraChange = false
   const bounds = map.getBounds()
@@ -238,6 +246,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
   userCameraChange = false
+  programmaticCameraChange = false
   map?.remove()
   map = null
   mapReady = false
@@ -250,6 +259,5 @@ onBeforeUnmount(() => {
     <div class="map-legend"><span class="legend-dot"></span>{{ coordinateDiagnostics().withCoordinates }} ubicados en el mapa</div>
     <div v-if="coordinateDiagnostics().withoutCoordinates" class="map-note">{{ coordinateDiagnostics().withoutCoordinates }} sin coordenadas exactas</div>
     <div v-if="coordinateDiagnostics().invalidCoordinates" class="map-note">{{ coordinateDiagnostics().invalidCoordinates }} con coordenadas no válidas</div>
-    <div v-if="!listings.length" class="map-empty"><span>⌖</span><strong>El mapa espera resultados</strong><small>Prueba con otros filtros</small></div>
   </section>
 </template>

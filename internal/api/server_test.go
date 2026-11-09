@@ -53,6 +53,9 @@ func TestListHandlerParsesFiltersAndKeepsNulls(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
+	if body["complete"] != true {
+		t.Fatalf("expected complete response: %#v", body["complete"])
+	}
 	data := body["data"].([]any)
 	listing := data[0].(map[string]any)
 	if listing["price"] != nil {

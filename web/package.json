@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test:coordinates": "node --experimental-strip-types scripts/coordinates-test.ts",
-    "test:camera": "node --experimental-strip-types scripts/camera-test.ts"
+    "test:camera": "node --experimental-strip-types scripts/camera-test.ts",
+    "test:geo-cache": "node --experimental-strip-types scripts/geo-cache-test.ts",
+    "test:map-empty": "node --experimental-strip-types scripts/map-empty-state-test.ts"
   },
   "dependencies": {
     "maplibre-gl": "^6.4.1",
