@@ -19,7 +19,8 @@ setWorkerUrl(workerUrl)
 
 const props = defineProps<{ listings: Listing[]; selectedId: number | null }>()
 type SelectionSource = 'marker-click'
-const emit = defineEmits<{ select: [listing: Listing, source: SelectionSource] }>()
+type ViewportBounds = { minLongitude: number; maxLongitude: number; minLatitude: number; maxLatitude: number }
+const emit = defineEmits<{ select: [listing: Listing, source: SelectionSource]; 'viewport-change': [bounds: ViewportBounds] }>()
 const mapElement = ref<HTMLElement | null>(null)
 let map: Map | null = null
 let mapReady = false
@@ -28,6 +29,7 @@ let resizeObserver: ResizeObserver | null = null
 let popup: Popup | null = null
 let popupHideTimer: ReturnType<typeof setTimeout> | null = null
 let popupHoverBound = false
+let userCameraChange = false
 const markers = new globalThis.Map<number, Marker>()
 
 const mappedListings = () => getValidListings(props.listings)
@@ -174,6 +176,22 @@ function updateMarkerStates(): void {
   }
 }
 
+function markUserCameraChange(): void {
+  userCameraChange = true
+}
+
+function emitUserViewport(): void {
+  if (!map || !userCameraChange) return
+  userCameraChange = false
+  const bounds = map.getBounds()
+  emit('viewport-change', {
+    minLongitude: bounds.getWest(),
+    maxLongitude: bounds.getEast(),
+    minLatitude: bounds.getSouth(),
+    maxLatitude: bounds.getNorth(),
+  })
+}
+
 function handleListingsChanged() {
   if (!mapReady) return
   renderMarkers()
@@ -189,6 +207,10 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => map?.resize())
   resizeObserver.observe(mapElement.value)
   map.addControl(new NavigationControl({ showCompass: false }), 'top-right')
+  map.on('dragstart', markUserCameraChange)
+  map.on('zoomstart', markUserCameraChange)
+  map.on('rotatestart', markUserCameraChange)
+  map.on('moveend', emitUserViewport)
   map.on('load', () => {
     mapReady = true
     map?.resize()
@@ -215,6 +237,7 @@ onBeforeUnmount(() => {
   popupHoverBound = false
   resizeObserver?.disconnect()
   resizeObserver = null
+  userCameraChange = false
   map?.remove()
   map = null
   mapReady = false

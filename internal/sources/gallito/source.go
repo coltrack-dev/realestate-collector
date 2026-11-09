@@ -2,6 +2,7 @@ package gallito
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,22 +43,34 @@ type SearchJob struct {
 }
 
 type JobProgress struct {
-	SearchID string `json:"search_id"`
-	Page     int    `json:"page"`
+	SearchID  string `json:"search_id"`
+	Page      int    `json:"page"`
+	Completed bool   `json:"completed"`
 }
 
 type Progress struct {
-	Jobs    map[string]JobProgress `json:"jobs"`
-	SeenIDs map[string]bool        `json:"seen_ids"`
+	Signature string                 `json:"signature"`
+	Jobs      map[string]JobProgress `json:"jobs"`
+	SeenIDs   map[string]bool        `json:"seen_ids"`
+}
+
+// ProgressSignature identifies the search configuration that produced a
+// progress file. A cursor from another configuration must never be resumed.
+func ProgressSignature(parts ...string) string {
+	digest := sha256.Sum256([]byte(strings.Join(append([]string{"gallito-progress-v1"}, parts...), "\x00")))
+	return fmt.Sprintf("%x", digest[:])
 }
 
 type JobStats struct {
-	Job              SearchJob
-	PagesFetched     int
-	ListingsFound    int
-	ListingsAccepted int
-	Duplicates       int
-	LastPage         int
+	Job               SearchJob
+	SearchID          string
+	PagesFetched      int
+	ListingsFound     int
+	ListingsAccepted  int
+	Duplicates        int
+	LastPage          int
+	ActualCities      []string
+	TerminationReason string
 }
 
 type rateLimiter struct {
@@ -192,64 +205,139 @@ func (s Source) CollectJobs(ctx context.Context, jobs []SearchJob, limit, maxPag
 	}
 	listings := make([]model.Listing, 0, min(limit, 100))
 	stats := make([]JobStats, 0, len(jobs))
+	jobStats := make(map[string]*JobStats, len(jobs))
 	for _, job := range jobs {
-		if len(listings) >= limit {
-			break
-		}
-		jobStat := JobStats{Job: job}
 		key := jobKey(job)
-		state := progress.Jobs[key]
-		if state.Page >= maxPages {
-			continue
-		}
-		var page searchResponse
-		if state.SearchID != "" && state.Page > 0 {
-			if err := s.call(ctx, "more_results", moreResultsArguments{SearchID: state.SearchID, Page: state.Page + 1}, &page); err != nil {
-				return listings, stats, fmt.Errorf("resume Gallito job %s: %w", key, err)
+		jobStats[key] = &JobStats{Job: job}
+	}
+
+	for {
+		activeJobs := 0
+		for _, job := range jobs {
+			key := jobKey(job)
+			jobStat := jobStats[key]
+			state := progress.Jobs[key]
+			if state.Completed {
+				continue
 			}
-		} else {
-			arguments := searchArguments{Operation: job.Operation, City: job.City, Department: job.Department,
-				PropertyTypes: nonEmpty(job.PropertyType), IncludeProjects: false, IncludeListings: true, Sort: "newest", Language: "es"}
-			if err := s.call(ctx, "search_listings", arguments, &page); err != nil {
-				return listings, stats, fmt.Errorf("start Gallito job %s: %w", key, err)
+			if len(listings) >= limit {
+				if jobStat.TerminationReason == "" {
+					jobStat.TerminationReason = "global_limit_reached_before_job"
+				}
+				state.Completed = true
+				progress.Jobs[key] = state
+				continue
 			}
-		}
-		for pageNumber := pageNumber(page, state); pageNumber <= maxPages && len(listings) < limit; pageNumber++ {
+			if state.Page >= maxPages {
+				jobStat.TerminationReason = "job_max_pages_reached"
+				state.Completed = true
+				progress.Jobs[key] = state
+				continue
+			}
+			activeJobs++
+
+			page, nextState, err := s.fetchJobPage(ctx, job, state)
+			if err != nil {
+				return listings, flattenJobStats(jobs, jobStats), err
+			}
+			jobStat.SearchID = page.SearchID
+			pageNo := pageNumber(page, state)
 			jobStat.PagesFetched++
-			jobStat.LastPage = pageNumber
+			jobStat.LastPage = pageNo
 			jobStat.ListingsFound += len(page.Listings)
 			for _, item := range page.Listings {
+				if item.City != "" && !containsString(jobStat.ActualCities, item.City) {
+					jobStat.ActualCities = append(jobStat.ActualCities, item.City)
+				}
 				if progress.SeenIDs[item.ID] {
 					jobStat.Duplicates++
 					continue
 				}
-				listing, err := toListing(item)
-				if err != nil {
+				listing, listingErr := toListing(item)
+				if listingErr != nil {
 					continue
 				}
 				progress.SeenIDs[item.ID] = true
 				listings = append(listings, listing)
 				jobStat.ListingsAccepted++
-				if len(listings) == limit {
+				if len(listings) >= limit {
 					break
 				}
 			}
-			progress.Jobs[key] = JobProgress{SearchID: page.SearchID, Page: pageNumber}
-			if s.ProgressHook != nil {
-				if err := s.ProgressHook(progress); err != nil {
-					return listings, stats, err
+
+			nextState.SearchID = page.SearchID
+			nextState.Page = pageNo
+			nextState.Completed = page.SearchID == "" || pageNo >= page.TotalPages || pageNo >= maxPages
+			if nextState.Completed && jobStat.TerminationReason == "" {
+				switch {
+				case len(listings) >= limit:
+					jobStat.TerminationReason = "global_limit_reached"
+				case page.SearchID == "":
+					jobStat.TerminationReason = "empty_search_id"
+				case pageNo >= maxPages:
+					jobStat.TerminationReason = "job_max_pages_reached"
+				default:
+					jobStat.TerminationReason = "search_exhausted"
 				}
 			}
-			if page.SearchID == "" || pageNumber >= page.TotalPages || pageNumber >= maxPages || len(listings) >= limit {
-				break
-			}
-			if err := s.call(ctx, "more_results", moreResultsArguments{SearchID: page.SearchID, Page: pageNumber + 1}, &page); err != nil {
-				return listings, stats, fmt.Errorf("page Gallito job %s: %w", key, err)
+			progress.Jobs[key] = nextState
+			if s.ProgressHook != nil {
+				if err := s.ProgressHook(progress); err != nil {
+					return listings, flattenJobStats(jobs, jobStats), err
+				}
 			}
 		}
-		stats = append(stats, jobStat)
+		if len(listings) >= limit {
+			for _, job := range jobs {
+				jobStat := jobStats[jobKey(job)]
+				if jobStat.TerminationReason == "" {
+					jobStat.TerminationReason = "global_limit_reached_before_job"
+				}
+			}
+			break
+		}
+		if activeJobs == 0 {
+			break
+		}
 	}
+	stats = flattenJobStats(jobs, jobStats)
 	return listings, stats, nil
+}
+
+func (s Source) fetchJobPage(ctx context.Context, job SearchJob, state JobProgress) (searchResponse, JobProgress, error) {
+	if state.SearchID != "" && state.Page > 0 {
+		var page searchResponse
+		err := s.call(ctx, "more_results", moreResultsArguments{SearchID: state.SearchID, Page: state.Page + 1}, &page)
+		if err == nil {
+			return page, state, nil
+		}
+		if !isExpiredSearchError(err) {
+			return searchResponse{}, state, fmt.Errorf("resume Gallito job %s: %w", jobKey(job), err)
+		}
+		state = JobProgress{}
+	}
+	arguments := searchArguments{Operation: job.Operation, City: job.City, Department: job.Department,
+		PropertyTypes: nonEmpty(job.PropertyType), IncludeProjects: false, IncludeListings: true, Sort: "newest", Language: "es"}
+	var page searchResponse
+	if err := s.call(ctx, "search_listings", arguments, &page); err != nil {
+		return searchResponse{}, state, fmt.Errorf("start Gallito job %s: %w", jobKey(job), err)
+	}
+	return page, state, nil
+}
+
+func isExpiredSearchError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "searchid") && (strings.Contains(message, "expired") || strings.Contains(message, "not found") || strings.Contains(message, "unknown"))
+}
+
+func flattenJobStats(jobs []SearchJob, values map[string]*JobStats) []JobStats {
+	result := make([]JobStats, 0, len(jobs))
+	for _, job := range jobs {
+		if value := values[jobKey(job)]; value != nil {
+			result = append(result, *value)
+		}
+	}
+	return result
 }
 
 func pageNumber(page searchResponse, previous JobProgress) int {
@@ -270,6 +358,15 @@ func nonEmpty(value string) []string {
 		return nil
 	}
 	return []string{value}
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func LoadProgress(path string) (*Progress, error) {

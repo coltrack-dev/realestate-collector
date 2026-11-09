@@ -1,5 +1,6 @@
 <script setup lang="ts">
-defineProps<{ total: number }>()
+withDefaults(defineProps<{ total: number; activeTab?: 'properties' | 'map' | 'stats' }>(), { activeTab: 'properties' })
+const emit = defineEmits<{ navigate: [tab: 'properties' | 'map' | 'stats'] }>()
 </script>
 
 <template>
@@ -10,9 +11,9 @@ defineProps<{ total: number }>()
     </a>
 
     <nav class="site-nav" aria-label="Navegación principal">
-      <a class="site-nav-link is-active" href="#catalogo">Propiedades</a>
-      <a class="site-nav-link" href="#mapa">Mapa</a>
-      <a class="site-nav-link" href="#estadisticas">Estadísticas</a>
+      <button class="site-nav-link" :class="{ 'is-active': activeTab === 'properties' }" type="button" @click="emit('navigate', 'properties')">Propiedades</button>
+      <button class="site-nav-link" :class="{ 'is-active': activeTab === 'map' }" type="button" @click="emit('navigate', 'map')">Mapa</button>
+      <button class="site-nav-link" :class="{ 'is-active': activeTab === 'stats' }" type="button" @click="emit('navigate', 'stats')">Estadísticas</button>
     </nav>
 
     <div class="site-context">

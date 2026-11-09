@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { fetchHistory, refreshListingDetails, resolveImageUrl } from '../api/client'
 import type { Listing, Snapshot } from '../types'
 import { getLocationPrecision } from '../map/coordinates'
@@ -13,14 +13,21 @@ const detailsLoading = ref(false)
 const detailsError = ref('')
 const imageFailed = ref(false)
 const selectedImage = ref(0)
+const expanded = ref(false)
 const details = ref<Listing | null>(null)
+const modalRoot = ref<HTMLElement | null>(null)
+const expandButton = ref<HTMLButtonElement | null>(null)
+const closeButton = ref<HTMLButtonElement | null>(null)
 let detailsController: AbortController | null = null
 let detailsRequestSequence = 0
+let previousFocusedElement: HTMLElement | null = null
 const detailsCache = new Map<number, Listing>()
 
 const money = (value: number | null, currency: string | null) => value == null ? 'Sin precio' : new Intl.NumberFormat('es-CO', { style: 'currency', currency: currency || 'COP', maximumFractionDigits: 0 }).format(value)
 const date = (value: string | null) => value ? new Intl.DateTimeFormat('es-CO', { dateStyle: 'medium' }).format(new Date(value)) : '—'
 const current = computed(() => details.value ?? props.listing)
+const photos = computed(() => current.value?.images ?? [])
+const currentPhoto = computed(() => photos.value[selectedImage.value] ?? null)
 const locationStatus = computed(() => {
   if (!current.value) return 'Ubicación no disponible'
   const precision = getLocationPrecision(current.value)
@@ -32,9 +39,11 @@ const locationStatus = computed(() => {
 
 async function loadHistory() {
   if (!props.listing) return
-  loading.value = true; error.value = ''
+  loading.value = true
+  error.value = ''
   try { history.value = await fetchHistory(props.listing.id) } catch (caught) { error.value = caught instanceof Error ? caught.message : 'No se pudo cargar el historial' } finally { loading.value = false }
 }
+
 async function loadDetails() {
   const listing = props.listing
   if (!listing) return
@@ -42,14 +51,9 @@ async function loadDetails() {
   detailsController?.abort()
   detailsController = new AbortController()
   detailsError.value = ''
-
   const cached = detailsCache.get(listing.id)
-  if (cached && cached.details_status === 'READY' && cached.details_expires_at && new Date(cached.details_expires_at) > new Date()) {
-    details.value = cached
-    return
-  }
+  if (cached && cached.details_status === 'READY' && cached.details_expires_at && new Date(cached.details_expires_at) > new Date()) { details.value = cached; return }
   if (listing.details_status === 'READY' && listing.details_expires_at && new Date(listing.details_expires_at) > new Date()) return
-
   detailsLoading.value = true
   try {
     const refreshed = await refreshListingDetails(listing.id, detailsController.signal)
@@ -59,9 +63,7 @@ async function loadDetails() {
   } catch (caught) {
     if (requestSequence !== detailsRequestSequence || (caught instanceof DOMException && caught.name === 'AbortError')) return
     detailsError.value = caught instanceof Error ? caught.message : 'No se pudieron actualizar los detalles'
-  } finally {
-    if (requestSequence === detailsRequestSequence) detailsLoading.value = false
-  }
+  } finally { if (requestSequence === detailsRequestSequence) detailsLoading.value = false }
 }
 
 function resetForListing() {
@@ -76,45 +78,126 @@ function resetForListing() {
   void loadHistory()
 }
 
+function selectImage(index: number) {
+  if (index < 0 || index >= photos.value.length) return
+  selectedImage.value = index
+  imageFailed.value = false
+}
+
+function moveImage(direction: number) {
+  if (photos.value.length < 2) return
+  selectImage((selectedImage.value + direction + photos.value.length) % photos.value.length)
+}
+
+function openFromMainPhoto() {
+  if (!expanded.value && currentPhoto.value) void openExpanded()
+}
+
+function handleMainPhotoKeydown(event: KeyboardEvent) {
+  if (expanded.value || !currentPhoto.value) return
+  if (event.target !== event.currentTarget) return
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    openFromMainPhoto()
+  }
+}
+
+function focusableElements(): HTMLElement[] {
+  if (!modalRoot.value) return []
+  return Array.from(modalRoot.value.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (!expanded.value) return
+  if (event.key === 'Escape') { event.preventDefault(); closeExpanded(); return }
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    event.preventDefault()
+    moveImage(event.key === 'ArrowLeft' ? -1 : 1)
+    return
+  }
+  if (event.key !== 'Tab') return
+  const focusable = focusableElements()
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (!modalRoot.value?.contains(document.activeElement)) {
+    event.preventDefault()
+    ;(event.shiftKey ? last : first).focus()
+    return
+  }
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+}
+
+async function openExpanded() {
+  previousFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  expanded.value = true
+  document.body.classList.add('detail-modal-open')
+  await nextTick()
+  closeButton.value?.focus()
+}
+
+function closeExpanded() {
+  expanded.value = false
+  document.body.classList.remove('detail-modal-open')
+  void nextTick(() => {
+    if (previousFocusedElement?.isConnected) previousFocusedElement.focus()
+    else expandButton.value?.focus()
+  })
+}
+
+function closeDetail() {
+  if (expanded.value) closeExpanded()
+  emit('close')
+}
+
 watch(() => props.listing?.id, resetForListing)
-watch(() => current.value?.images?.[0], () => { imageFailed.value = false })
-onMounted(resetForListing)
-onBeforeUnmount(() => detailsController?.abort())
+watch(() => current.value?.images?.length, (length) => {
+  imageFailed.value = false
+  if (!length) selectedImage.value = 0
+  else if (selectedImage.value >= length) selectedImage.value = length - 1
+})
+onMounted(() => { resetForListing(); document.addEventListener('keydown', handleKeydown) })
+onBeforeUnmount(() => { detailsController?.abort(); document.removeEventListener('keydown', handleKeydown); document.body.classList.remove('detail-modal-open') })
 </script>
 
 <template>
-  <aside v-if="current" class="detail-drawer">
-    <button class="close-button" type="button" aria-label="Cerrar detalle" @click="emit('close')">×</button>
-    <div v-if="current.images?.length && !imageFailed" class="detail-gallery">
-      <img :src="resolveImageUrl(current.images[selectedImage])" :alt="current.title" @error="imageFailed = true" />
-      <div v-if="current.images.length > 1" class="detail-thumbnails" role="tablist" aria-label="Fotos del inmueble">
-        <button v-for="(image, index) in current.images" :key="image" type="button" :class="{ active: selectedImage === index }" role="tab" :aria-selected="selectedImage === index" :aria-label="`Ver foto ${index + 1}`" @click="selectedImage = index"><img :src="resolveImageUrl(image)" alt="" loading="lazy" /></button>
-      </div>
-    </div>
-    <div class="detail-body">
-      <span class="eyebrow">{{ current.source }} · {{ current.external_id }}</span>
-      <h2>{{ current.title }}</h2>
-      <p class="detail-price">{{ money(current.price, current.currency) }}</p>
-      <p class="detail-location">{{ current.city }}<span v-if="current.neighborhood"> · {{ current.neighborhood }}</span></p>
-      <p class="detail-location-precision">{{ locationStatus }}</p>
-      <div class="detail-spec-grid">
-        <div><small>Área</small><strong>{{ current.area_m2 != null ? `${current.area_m2} m²` : '—' }}</strong></div>
-        <div><small>Habitaciones</small><strong>{{ current.bedrooms ?? '—' }}</strong></div>
-        <div><small>Baños</small><strong>{{ current.bathrooms ?? '—' }}</strong></div>
-        <div><small>Parqueaderos</small><strong>{{ current.parking_spots ?? '—' }}</strong></div>
-      </div>
-      <p v-if="current.description" class="detail-description">{{ current.description }}</p>
-      <div v-if="detailsLoading" class="inline-state">Actualizando detalles…</div>
-      <div v-else-if="detailsError" class="inline-state error-text">{{ detailsError }} <button type="button" class="text-button" @click="loadDetails">Reintentar</button></div>
-      <div class="observation-row"><span>Primer registro <strong>{{ date(current.first_seen_at) }}</strong></span><span>Último registro <strong>{{ date(current.last_seen_at) }}</strong></span></div>
-      <section class="history-section">
-        <div class="section-title"><span>Historial de precio</span><span class="history-count">{{ history.length }}</span></div>
-        <div v-if="loading" class="inline-state">Cargando historial…</div>
-        <div v-else-if="error" class="inline-state error-text">{{ error }}</div>
-        <div v-else-if="!history.length" class="inline-state">Sin cambios registrados.</div>
-        <div v-else class="history-list"><div v-for="item in history" :key="item.id" class="history-item"><span>{{ date(item.collected_at) }}</span><strong>{{ money(item.price, item.currency) }}</strong></div></div>
+  <div v-if="current" class="detail-layer">
+    <div v-if="expanded" class="detail-modal-backdrop" aria-hidden="true" @click="closeExpanded"></div>
+    <aside ref="modalRoot" class="detail-drawer" :class="{ 'is-expanded': expanded }" :role="expanded ? 'dialog' : 'complementary'" :aria-modal="expanded ? 'true' : undefined" :aria-label="expanded ? 'Detalle de la propiedad' : undefined">
+      <header class="detail-header">
+        <span class="eyebrow">{{ current.source }} · {{ current.external_id }}</span>
+        <div class="detail-actions">
+          <button ref="expandButton" class="detail-action-button" type="button" :aria-label="expanded ? 'Reducir detalle' : 'Expandir detalle'" :title="expanded ? 'Reducir' : 'Expandir'" @click="expanded ? closeExpanded() : openExpanded()"><span aria-hidden="true">{{ expanded ? '⤡' : '⤢' }}</span></button>
+          <button ref="closeButton" class="close-button" type="button" aria-label="Cerrar detalle" @click="closeDetail">×</button>
+        </div>
+      </header>
+
+      <section class="detail-gallery" aria-label="Galería de fotografías">
+        <div v-if="currentPhoto && !imageFailed" class="detail-gallery-main" :class="{ 'is-zoomable': !expanded }" :role="expanded ? undefined : 'button'" :tabindex="expanded ? -1 : 0" :aria-label="expanded ? undefined : 'Ampliar fotografía'" @click="openFromMainPhoto" @keydown="handleMainPhotoKeydown">
+          <button v-if="photos.length > 1" class="gallery-arrow gallery-arrow-prev" type="button" aria-label="Fotografía anterior" @click.stop="moveImage(-1)">‹</button>
+          <img :src="resolveImageUrl(currentPhoto)" :alt="current.title" @error="imageFailed = true" />
+          <button v-if="photos.length > 1" class="gallery-arrow gallery-arrow-next" type="button" aria-label="Fotografía siguiente" @click.stop="moveImage(1)">›</button>
+        </div>
+        <div v-else class="detail-gallery-placeholder"><span aria-hidden="true">⌂</span><small>Sin fotografías disponibles</small></div>
+        <div v-if="photos.length" class="detail-thumbnails" role="tablist" aria-label="Fotos del inmueble">
+          <button v-for="(image, index) in photos" :key="`${image}-${index}`" type="button" :class="{ active: selectedImage === index }" role="tab" :aria-selected="selectedImage === index" :aria-label="`Ver foto ${index + 1}`" @click="selectImage(index)"><img :src="resolveImageUrl(image)" alt="" loading="lazy" decoding="async" /></button>
+        </div>
       </section>
-      <a class="original-link" :href="current.url" target="_blank" rel="noreferrer">Ver publicación original <span>↗</span></a>
-    </div>
-  </aside>
+
+      <div class="detail-body">
+        <h2>{{ current.title }}</h2>
+        <p class="detail-price">{{ money(current.price, current.currency) }}</p>
+        <p class="detail-location">{{ current.city }}<span v-if="current.neighborhood"> · {{ current.neighborhood }}</span></p>
+        <p class="detail-location-precision">{{ locationStatus }}</p>
+        <div class="detail-spec-grid"><div><small>Área</small><strong>{{ current.area_m2 != null ? `${current.area_m2} m²` : '—' }}</strong></div><div><small>Habitaciones</small><strong>{{ current.bedrooms ?? '—' }}</strong></div><div><small>Baños</small><strong>{{ current.bathrooms ?? '—' }}</strong></div><div><small>Parqueaderos</small><strong>{{ current.parking_spots ?? '—' }}</strong></div></div>
+        <p v-if="current.description" class="detail-description">{{ current.description }}</p>
+        <div v-if="detailsLoading" class="inline-state">Actualizando detalles…</div>
+        <div v-else-if="detailsError" class="inline-state error-text">{{ detailsError }} <button type="button" class="text-button" @click="loadDetails">Reintentar</button></div>
+        <div class="observation-row"><span>Primer registro <strong>{{ date(current.first_seen_at) }}</strong></span><span>Último registro <strong>{{ date(current.last_seen_at) }}</strong></span></div>
+        <section class="history-section"><div class="section-title"><span>Historial de precio</span><span class="history-count">{{ history.length }}</span></div><div v-if="loading" class="inline-state">Cargando historial…</div><div v-else-if="error" class="inline-state error-text">{{ error }}</div><div v-else-if="!history.length" class="inline-state">Sin cambios registrados.</div><div v-else class="history-list"><div v-for="item in history" :key="item.id" class="history-item"><span>{{ date(item.collected_at) }}</span><strong>{{ money(item.price, item.currency) }}</strong></div></div></section>
+        <a class="original-link" :href="current.url" target="_blank" rel="noreferrer">Ver publicación original <span>↗</span></a>
+      </div>
+    </aside>
+  </div>
 </template>

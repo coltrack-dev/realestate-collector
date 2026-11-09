@@ -67,6 +67,10 @@ export interface ListingFilters {
   max_price: string
   min_area: string
   max_area: string
+  min_longitude: string
+  max_longitude: string
+  min_latitude: string
+  max_latitude: string
   limit: number
   offset: number
 }

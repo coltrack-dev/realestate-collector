@@ -20,12 +20,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
-export function fetchListings(filters: ListingFilters): Promise<ListingsResponse> {
+export function fetchListings(filters: ListingFilters, signal?: AbortSignal): Promise<ListingsResponse> {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(filters)) {
     if (value !== '' && value !== undefined && value !== null) params.set(key, String(value))
   }
-  return request<ListingsResponse>(`/listings?${params.toString()}`)
+  return request<ListingsResponse>(`/listings?${params.toString()}`, { signal })
 }
 
 export function fetchListing(id: number): Promise<Listing> {

@@ -6,7 +6,7 @@ const emit = defineEmits<{ apply: [filters: ListingFilters]; reset: [] }>()
 
 const filters = reactive<ListingFilters>({
   source: '', country_code: '', city: '', operation: '', property_type: '',
-  min_price: '', max_price: '', min_area: '', max_area: '', limit: 50, offset: 0,
+  min_price: '', max_price: '', min_area: '', max_area: '', min_longitude: '', max_longitude: '', min_latitude: '', max_latitude: '', limit: 50, offset: 0,
 })
 
 function submit() {
@@ -14,7 +14,7 @@ function submit() {
 }
 
 function reset() {
-  Object.assign(filters, { source: '', country_code: '', city: '', operation: '', property_type: '', min_price: '', max_price: '', min_area: '', max_area: '', offset: 0 })
+  Object.assign(filters, { source: '', country_code: '', city: '', operation: '', property_type: '', min_price: '', max_price: '', min_area: '', max_area: '', min_longitude: '', max_longitude: '', min_latitude: '', max_latitude: '', offset: 0 })
   emit('reset')
 }
 </script>

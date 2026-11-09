@@ -25,6 +25,8 @@ type ListingFilter struct {
 	Source, CountryCode, City, Operation, PropertyType string
 	MinPrice, MaxPrice                                 *int64
 	MinArea, MaxArea                                   *float64
+	MinLongitude, MaxLongitude                         *float64
+	MinLatitude, MaxLatitude                           *float64
 	Limit, Offset                                      int
 }
 
@@ -253,6 +255,28 @@ func parseFilter(request *http.Request) (ListingFilter, error) {
 	}
 	if filter.MinArea != nil && filter.MaxArea != nil && *filter.MinArea > *filter.MaxArea {
 		return ListingFilter{}, errors.New("min_area must not exceed max_area")
+	}
+	filter.MinLongitude, err = optionalFloat64(query.Get("min_longitude"), "min_longitude")
+	if err != nil {
+		return ListingFilter{}, err
+	}
+	filter.MaxLongitude, err = optionalFloat64(query.Get("max_longitude"), "max_longitude")
+	if err != nil {
+		return ListingFilter{}, err
+	}
+	filter.MinLatitude, err = optionalFloat64(query.Get("min_latitude"), "min_latitude")
+	if err != nil {
+		return ListingFilter{}, err
+	}
+	filter.MaxLatitude, err = optionalFloat64(query.Get("max_latitude"), "max_latitude")
+	if err != nil {
+		return ListingFilter{}, err
+	}
+	if filter.MinLongitude != nil && filter.MaxLongitude != nil && *filter.MinLongitude > *filter.MaxLongitude {
+		return ListingFilter{}, errors.New("min_longitude must not exceed max_longitude")
+	}
+	if filter.MinLatitude != nil && filter.MaxLatitude != nil && *filter.MinLatitude > *filter.MaxLatitude {
+		return ListingFilter{}, errors.New("min_latitude must not exceed max_latitude")
 	}
 	return filter, nil
 }

@@ -204,6 +204,18 @@ func listingConditions(filter api.ListingFilter) ([]string, []any) {
 	if filter.MaxArea != nil {
 		add("l.area_m2 <= $%d", *filter.MaxArea)
 	}
+	if filter.MinLongitude != nil {
+		add("l.longitude >= $%d", *filter.MinLongitude)
+	}
+	if filter.MaxLongitude != nil {
+		add("l.longitude <= $%d", *filter.MaxLongitude)
+	}
+	if filter.MinLatitude != nil {
+		add("l.latitude >= $%d", *filter.MinLatitude)
+	}
+	if filter.MaxLatitude != nil {
+		add("l.latitude <= $%d", *filter.MaxLatitude)
+	}
 	return conditions, args
 }
 

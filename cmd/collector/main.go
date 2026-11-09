@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -179,13 +180,18 @@ func collect(ctx context.Context, options commandOptions) (collectedData, error)
 		if len(jobs) == 0 {
 			return collectedData{}, fmt.Errorf("no valid Gallito search jobs for region=%q", options.region)
 		}
-		progress := &gallito.Progress{}
+		signature := gallito.ProgressSignature("UY", options.operation, options.property, options.region,
+			strconv.Itoa(maxListings), strconv.Itoa(options.maxPages))
+		progress := &gallito.Progress{Signature: signature}
 		progressPath := ""
 		if options.resume {
 			progressPath = options.progressFile
 			loaded, progressErr := gallito.LoadProgress(progressPath)
 			if progressErr != nil {
 				return collectedData{}, progressErr
+			}
+			if loaded.Signature != signature {
+				return collectedData{}, fmt.Errorf("Gallito progress signature mismatch: progress belongs to another search configuration; use a new -progress-file")
 			}
 			progress = loaded
 		}
@@ -200,9 +206,21 @@ func collect(ctx context.Context, options commandOptions) (collectedData, error)
 		for _, jobStat := range jobStats {
 			slog.Info("Gallito import progress", "region", jobStat.Job.Region, "city", jobStat.Job.City,
 				"operation", jobStat.Job.Operation, "property_type", jobStat.Job.PropertyType,
+				"search_id", jobStat.SearchID, "page", jobStat.LastPage,
 				"pages", jobStat.PagesFetched, "found", jobStat.ListingsFound,
-				"accepted", jobStat.ListingsAccepted, "duplicates", jobStat.Duplicates, "last_page", jobStat.LastPage)
+				"accepted", jobStat.ListingsAccepted, "duplicates", jobStat.Duplicates,
+				"actual_cities", jobStat.ActualCities, "termination_reason", jobStat.TerminationReason)
 		}
+		var pagesFetched, listingsFound, listingsAccepted, duplicates int
+		for _, jobStat := range jobStats {
+			pagesFetched += jobStat.PagesFetched
+			listingsFound += jobStat.ListingsFound
+			listingsAccepted += jobStat.ListingsAccepted
+			duplicates += jobStat.Duplicates
+		}
+		slog.Info("Gallito global progress", "jobs", len(jobStats), "pages", pagesFetched,
+			"returned", listingsFound, "unique_accepted", listingsAccepted,
+			"duplicates_skipped", duplicates, "global_limit", maxListings)
 		return collectedData{listings: listings}, err
 	case "igac-transactions":
 		settings := config.Load()
