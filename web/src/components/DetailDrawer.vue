@@ -24,7 +24,22 @@ const detailsCache = new Map<number, Listing>()
 
 const money = (value: number | null, currency: string | null) => value == null ? 'Sin precio' : new Intl.NumberFormat('es-CO', { style: 'currency', currency: currency || 'COP', maximumFractionDigits: 0 }).format(value)
 const date = (value: string | null) => value ? new Intl.DateTimeFormat('es-CO', { dateStyle: 'medium' }).format(new Date(value)) : '—'
-const current = computed(() => details.value ?? props.listing)
+function mergeImages(summary: string[] | null | undefined, detail: string[] | null | undefined): string[] {
+  const result: string[] = []
+  for (const image of [...(detail ?? []), ...(summary ?? [])]) {
+    if (image && !result.includes(image)) result.push(image)
+  }
+  return result
+}
+const current = computed(() => {
+  if (!details.value) return props.listing
+  if (!props.listing || details.value.id !== props.listing.id) return details.value
+  return {
+    ...props.listing,
+    ...details.value,
+    images: mergeImages(props.listing.images, details.value.images),
+  }
+})
 const photos = computed(() => current.value?.images ?? [])
 const currentPhoto = computed(() => photos.value[selectedImage.value] ?? null)
 const locationStatus = computed(() => {
@@ -51,8 +66,11 @@ async function loadDetails() {
   detailsController = new AbortController()
   detailsError.value = ''
   const cached = detailsCache.get(listing.id)
-  if (cached && cached.details_status === 'READY' && cached.details_expires_at && new Date(cached.details_expires_at) > new Date()) { details.value = cached; return }
-  if (listing.details_status === 'READY' && listing.details_expires_at && new Date(listing.details_expires_at) > new Date()) return
+  if (cached?.details_status === 'UNSUPPORTED' || listing.details_status === 'UNSUPPORTED') return
+  const cachedHasGallery = (cached?.images?.length ?? 0) > 1 || (listing.images?.length ?? 0) > 1
+  if (cached && cached.details_status === 'READY' && cached.details_expires_at && new Date(cached.details_expires_at) > new Date() && cachedHasGallery) { details.value = cached; return }
+  const listingHasGallery = (listing.images?.length ?? 0) > 1
+  if (listing.details_status === 'READY' && listing.details_expires_at && new Date(listing.details_expires_at) > new Date() && listingHasGallery) return
   detailsLoading.value = true
   try {
     const refreshed = await refreshListingDetails(listing.id, detailsController.signal)

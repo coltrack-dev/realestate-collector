@@ -8,18 +8,19 @@ let viewportRefreshRequests = []
 let plannedSourceQueries = []
 let statusRequests = 0
 
+const mockImages = ['2f6d59', 'b35c44', '2f5d9a', 'b07a2a', '4b6fa8'].map((color) => `data:image/svg+xml,%3Csvg xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22 width%3D%22320%22 height%3D%22200%22%3E%3Crect width%3D%22320%22 height%3D%22200%22 fill%3D%22%23${color}%22%2F%3E%3C%2Fsvg%3E`)
 const listing = {
   id: 101, source: 'mock', external_id: 'MOCK-101', url: 'https://example.test/101',
   title: 'Apartamento de prueba', description: '', operation: 'SALE', property_type: 'APARTMENT',
   price: 350000000, currency: 'COP', area_m2: 70, bedrooms: 2, bathrooms: 2, parking_spots: null,
   country: 'Colombia', country_code: 'CO', department: 'Cundinamarca', city: 'Bogotá D.C.', neighborhood: 'Chapinero',
   address: null, latitude: 4.711, longitude: -74.0721, resolved_latitude: null, resolved_longitude: null,
-  location_precision: 'EXACT', geocode_provider: null, geocoded_at: null, images: ['data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="320" height="200"%3E%3Crect width="320" height="200" fill="%232f6d59"/%3E%3C/svg%3E'], published_at: null,
+  location_precision: 'EXACT', geocode_provider: null, geocoded_at: null, images: mockImages, published_at: null,
   collected_at: new Date().toISOString(), first_seen_at: new Date().toISOString(), last_seen_at: new Date().toISOString(),
   details_fetched_at: null, details_expires_at: null, details_status: 'NOT_LOADED',
 }
 const importedListing = { ...listing, id: 202, external_id: 'MOCK-202', title: 'Apartamento incorporado por refresh' }
-const secondListing = { ...listing, id: 102, external_id: 'MOCK-102', title: 'Segundo apartamento de prueba', longitude: -74.073, latitude: 4.712 }
+const secondListing = { ...listing, id: 102, external_id: 'MOCK-102', title: 'Segundo apartamento de prueba', longitude: -74.073, latitude: 4.712, images: [mockImages[0]] }
 const inventory = [listing, secondListing]
 let lastViewport = null
 
@@ -207,6 +208,13 @@ try {
   }
   if (viewportRefreshRequests.length !== refreshesBeforeSelection) throw new Error('second marker selection triggered a source refresh')
   console.log('marker selection preserved camera state')
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `document.querySelectorAll('.map-marker')[0].click(); return true`, args: [] })
+  await waitFor(async () => await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelectorAll('.detail-thumbnails button').length`, args: [] }).then((count) => count === 5))
+  const firstPhoto = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.detail-gallery-main img').getAttribute('src')`, args: [] })
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `document.querySelectorAll('.detail-thumbnails button')[2].click(); return true`, args: [] })
+  const thirdPhoto = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return { src: document.querySelector('.detail-gallery-main img').getAttribute('src'), active: document.querySelectorAll('.detail-thumbnails button.active').length }`, args: [] })
+  if (thirdPhoto.src === firstPhoto || thirdPhoto.active !== 1) throw new Error('third gallery thumbnail did not become active')
+  console.log('detail gallery restored with five photos')
   await clickSelector('.detail-gallery-main')
   await waitFor(async () => await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.detail-drawer.is-expanded') !== null`, args: [] }))
   await clickSelector('.detail-toggle-button')
@@ -226,9 +234,17 @@ try {
   await clickSelector('.detail-toggle-button')
   const reopenedState = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.detail-toggle-button').getAttribute('aria-expanded')`, args: [] })
   if (reopenedState !== 'true' || viewportRefreshRequests.length !== refreshesBeforeSelection) throw new Error('reopening DetailDrawer changed refresh state')
+  const galleryAfterReopen = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return { count: document.querySelectorAll('.detail-thumbnails button').length, active: document.querySelectorAll('.detail-thumbnails button.active').length, src: document.querySelector('.detail-gallery-main img').getAttribute('src') }`, args: [] })
+  if (galleryAfterReopen.count !== 5 || galleryAfterReopen.active !== 1 || galleryAfterReopen.src !== thirdPhoto.src) throw new Error('gallery state was not preserved after drawer reopen')
   await webdriver('POST', `/session/${session}/execute/sync`, { script: `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true`, args: [] })
   const escapeState = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.detail-toggle-button').getAttribute('aria-expanded')`, args: [] })
   if (escapeState !== 'false') throw new Error('Escape did not close DetailDrawer')
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `document.querySelectorAll('.map-marker')[0].click(); return true`, args: [] })
+  await waitFor(async () => await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelectorAll('.detail-thumbnails button').length`, args: [] }).then((count) => count === 5))
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `document.querySelectorAll('.map-marker')[1].click(); return true`, args: [] })
+  await waitFor(async () => await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelectorAll('.detail-thumbnails button').length`, args: [] }).then((count) => count === 1))
+  if (await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.detail-gallery-placeholder') !== null`, args: [] })) throw new Error('single-photo listing rendered an empty gallery placeholder')
+  console.log('single-photo listing has no empty thumbnails')
   await webdriver('POST', `/session/${session}/execute/sync`, { script: `window.__listingMapForTests.setZoom(18); return true`, args: [] })
   console.log('map moved')
   await new Promise((resolve) => setTimeout(resolve, 5000))
