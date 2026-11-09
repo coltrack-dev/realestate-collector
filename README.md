@@ -169,10 +169,18 @@ GET /api/v1/listings/{id}
 GET /api/v1/listings/{id}/history
 POST /api/v1/listings/{id}/refresh-details
 GET /api/v1/stats
+POST /api/v1/source-refresh
+GET /api/v1/source-refresh/{id}
 ```
 
-The API is read-only, uses parameterized PostgreSQL queries, applies filters in
-PostgreSQL, and caps pages at 100 records. It does not expose contact details.
+Listing reads are read-only and use parameterized PostgreSQL queries, with pages
+capped at 100 records. `POST /api/v1/source-refresh` only queues a bounded,
+asynchronous refresh for configured sources; it never accepts arbitrary external
+URLs. VIXORA and D.C Colombia require a city filter and are throttled per source;
+Gallito is registered but disabled until automated aggregation is explicitly
+permitted. Set `SOURCE_REFRESH_ENABLED=false` to disable refresh globally. The
+endpoint is intended for localhost or a protected deployment and does not expose
+contact details.
 
 ## Web UI
 

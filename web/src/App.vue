@@ -5,7 +5,7 @@ import ListingCard from './components/ListingCard.vue'
 import ListingMap from './components/ListingMap.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
 import SiteHeader from './components/SiteHeader.vue'
-import { fetchListings, fetchStats } from './api/client'
+import { fetchListings, fetchStats, getSourceRefresh, requestSourceRefresh } from './api/client'
 import type { Listing, ListingFilters, Stats } from './types'
 import { getValidCoordinates } from './map/coordinates'
 import { expandBounds, geoCacheKey, GeoResultsCache, type GeoBounds } from './map/geoCache'
@@ -28,10 +28,12 @@ const mapViewport = ref<GeoBounds | null>(null)
 const viewportLoading = ref(false)
 const viewportError = ref('')
 const viewportHasLoaded = ref(false)
+const sourceRefreshStatus = ref('')
 let listingsController: AbortController | null = null
 let mapController: AbortController | null = null
 let mapRequestSequence = 0
 let mapDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let sourceRefreshSequence = 0
 const geoCache = new GeoResultsCache()
 const mapDraft = reactive({ country_code: '', operation: '', property_type: '', city: '', min_price: '', max_price: '' })
 
@@ -142,7 +144,39 @@ function scheduleMapSearch(bounds: GeoBounds): void {
   }, 350)
 }
 
-async function loadMapArea(bounds: GeoBounds): Promise<void> {
+async function refreshSources(bounds: GeoBounds, requestSequence: number, cacheKey: string): Promise<void> {
+  const countryCode = filters.value.country_code
+  if (countryCode !== 'CO' && countryCode !== 'UY') return
+  const refreshSequence = ++sourceRefreshSequence
+  try {
+    const result = await requestSourceRefresh({
+      country_code: countryCode,
+      city: filters.value.city || undefined,
+      operation: filters.value.operation || undefined,
+      property_type: filters.value.property_type || undefined,
+      bbox: { min_longitude: bounds.minLongitude, max_longitude: bounds.maxLongitude, min_latitude: bounds.minLatitude, max_latitude: bounds.maxLatitude },
+    })
+    if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
+    if (!result.refresh_id || result.status === 'SKIPPED' || result.status === 'UNSUPPORTED' || result.status === 'COOLDOWN') return
+    sourceRefreshStatus.value = 'Buscando nuevas propiedades…'
+    for (let attempt = 0; attempt < 45; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
+      const status = await getSourceRefresh(result.refresh_id)
+      if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
+      if (status.status === 'DONE') {
+        geoCache.delete(cacheKey)
+        sourceRefreshStatus.value = ''
+        await loadMapArea(bounds, true)
+        return
+      }
+      if (status.status === 'FAILED') { sourceRefreshStatus.value = ''; return }
+    }
+    sourceRefreshStatus.value = ''
+  } catch { if (refreshSequence === sourceRefreshSequence) sourceRefreshStatus.value = '' }
+}
+
+async function loadMapArea(bounds: GeoBounds, forceDatabase = false): Promise<void> {
   const expanded = expandBounds(bounds)
   const requestFilters: ListingFilters = {
     ...filters.value,
@@ -154,7 +188,7 @@ async function loadMapArea(bounds: GeoBounds): Promise<void> {
     offset: 0,
   }
   const key = geoCacheKey(requestFilters)
-  const cached = geoCache.get(key, bounds)
+  const cached = forceDatabase ? null : geoCache.get(key, bounds)
   if (cached) {
     viewportListings.value = filterListingsToViewport(cached, bounds)
     preserveSelection(viewportListings.value)
@@ -177,6 +211,7 @@ async function loadMapArea(bounds: GeoBounds): Promise<void> {
     viewportListings.value = filterListingsToViewport(response.data, bounds)
     preserveSelection(viewportListings.value)
     viewportHasLoaded.value = true
+    if (!forceDatabase && activeTab.value === 'map') void refreshSources(bounds, requestSequence, key)
   } catch (caught) {
     if (requestSequence !== mapRequestSequence || (caught instanceof DOMException && caught.name === 'AbortError')) return
     viewportError.value = caught instanceof Error ? caught.message : 'No se pudo actualizar esta zona'
@@ -194,6 +229,7 @@ onBeforeUnmount(() => {
   if (mapDebounceTimer) clearTimeout(mapDebounceTimer)
   mapController?.abort()
   listingsController?.abort()
+  sourceRefreshSequence++
 })
 </script>
 
@@ -247,6 +283,7 @@ onBeforeUnmount(() => {
         <div class="map-stage">
           <ListingMap :listings="viewportListings" :selected-id="selected?.id ?? null" @select="selectListingFromMarker" @viewport-change="handleViewportChange" />
           <div v-if="viewportLoading" class="map-auto-status" role="status">Actualizando propiedades…</div>
+          <div v-else-if="sourceRefreshStatus" class="map-auto-status" role="status">{{ sourceRefreshStatus }}</div>
           <div v-else-if="viewportError" class="map-auto-status map-search-error" role="status">No se pudieron actualizar las propiedades.</div>
           <aside v-if="activeTab === 'map'" class="map-list-panel" :class="{ open: mapListOpen }" aria-label="Propiedades en el mapa">
             <button type="button" class="map-list-toggle" @click="mapListOpen = !mapListOpen">{{ mapListOpen ? 'Ocultar lista' : 'Ver propiedades' }} <span aria-hidden="true">{{ mapListOpen ? '←' : '→' }}</span></button>

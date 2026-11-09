@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/example/realestate-collector/internal/model"
+	"github.com/example/realestate-collector/internal/refresh"
 )
 
 const (
@@ -64,6 +66,7 @@ type Repository interface {
 type Server struct {
 	Repository Repository
 	Details    *DetailsService
+	Refresh    *refresh.Coordinator
 }
 
 func NewServer(repository Repository, details ...*DetailsService) http.Handler {
@@ -77,6 +80,55 @@ func NewServer(repository Repository, details ...*DetailsService) http.Handler {
 	mux.HandleFunc("/api/v1/listings/", server.listingByID)
 	mux.HandleFunc("/api/v1/stats", server.stats)
 	return loggingMiddleware(mux)
+}
+
+func NewServerWithRefresh(repository Repository, details *DetailsService, coordinator *refresh.Coordinator) http.Handler {
+	server := &Server{Repository: repository, Details: details, Refresh: coordinator}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", server.health)
+	mux.HandleFunc("/api/v1/listings", server.listings)
+	mux.HandleFunc("/api/v1/listings/", server.listingByID)
+	mux.HandleFunc("/api/v1/stats", server.stats)
+	mux.HandleFunc("/api/v1/source-refresh", server.sourceRefresh)
+	mux.HandleFunc("/api/v1/source-refresh/", server.sourceRefreshByID)
+	return loggingMiddleware(mux)
+}
+
+type sourceRefreshRequest struct {
+	CountryCode  string         `json:"country_code"`
+	City         string         `json:"city"`
+	Bounds       refresh.Bounds `json:"bbox"`
+	Operation    string         `json:"operation"`
+	PropertyType string         `json:"property_type"`
+}
+
+func (s *Server) sourceRefresh(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost { methodNotAllowed(writer); return }
+	if s.Refresh == nil { writeJSON(writer, http.StatusNotImplemented, refresh.Result{Status: refresh.StatusUnsupported}); return }
+	var payload sourceRefreshRequest
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 16<<10)).Decode(&payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid refresh request")
+		return
+	}
+	if payload.CountryCode == "" || !payload.Bounds.Valid() {
+		writeError(writer, http.StatusBadRequest, "country_code and valid bbox are required")
+		return
+	}
+	clientKey := request.RemoteAddr
+	if host, _, err := net.SplitHostPort(clientKey); err == nil { clientKey = host }
+	result := s.Refresh.Request(refresh.Request{CountryCode: payload.CountryCode, City: payload.City, Bounds: payload.Bounds, Operation: payload.Operation, PropertyType: payload.PropertyType}, clientKey)
+	status := http.StatusOK
+	if result.Status == refresh.StatusQueued { status = http.StatusAccepted }
+	writeJSON(writer, status, result)
+}
+
+func (s *Server) sourceRefreshByID(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet { methodNotAllowed(writer); return }
+	if s.Refresh == nil { writeError(writer, http.StatusNotFound, "refresh not found"); return }
+	id := strings.TrimPrefix(request.URL.Path, "/api/v1/source-refresh/")
+	status, ok := s.Refresh.Get(strings.Trim(id, "/"))
+	if !ok { writeError(writer, http.StatusNotFound, "refresh not found"); return }
+	writeJSON(writer, http.StatusOK, status)
 }
 
 func (s *Server) health(writer http.ResponseWriter, request *http.Request) {

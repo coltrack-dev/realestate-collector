@@ -21,6 +21,7 @@ const DefaultEndpoint = "https://www.dccolombia.com.co/api/properties"
 type Source struct {
 	Client   *httpclient.Client
 	Endpoint string
+	City, Operation, PropertyType string
 }
 
 func New(httpClient *http.Client, userAgent string, delay time.Duration) Source {
@@ -72,6 +73,11 @@ func (s Source) Collect(ctx context.Context, limit int) ([]model.Listing, error)
 	if err != nil {
 		return nil, fmt.Errorf("parse D.C Colombia endpoint: %w", err)
 	}
+	query := endpoint.Query()
+	if s.City != "" { query.Set("city", s.City) }
+	if s.Operation != "" { query.Set("operation", s.Operation) }
+	if s.PropertyType != "" { query.Set("property_type", s.PropertyType) }
+	endpoint.RawQuery = query.Encode()
 	var page response
 	if err := s.Client.GetJSON(ctx, endpoint.String(), &page); err != nil {
 		return nil, err

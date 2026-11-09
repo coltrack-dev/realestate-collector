@@ -81,6 +81,10 @@ export class GeoResultsCache {
     this.entries.clear()
   }
 
+  delete(key: string): void {
+    this.entries.delete(key)
+  }
+
   get size(): number {
     return this.entries.size
   }

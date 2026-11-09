@@ -12,6 +12,7 @@ type Config struct {
 	ImageMaxBytes                    int64
 	ImageCacheTTL                    time.Duration
 	DetailsTTL                       time.Duration
+	SourceRefreshEnabled             bool
 	Delay                            time.Duration
 	MaxPages, MaxListings            int
 }
@@ -29,6 +30,7 @@ func Load() Config {
 		ImageMaxBytes:    20 * 1024 * 1024,
 		ImageCacheTTL:    24 * time.Hour,
 		DetailsTTL:       24 * time.Hour,
+		SourceRefreshEnabled: true,
 	}
 	if c.UserAgent == "" {
 		c.UserAgent = "realestate-collector/0.1"
@@ -62,5 +64,6 @@ func Load() Config {
 			c.DetailsTTL = x
 		}
 	}
+	if v := os.Getenv("SOURCE_REFRESH_ENABLED"); v == "false" || v == "0" { c.SourceRefreshEnabled = false }
 	return c
 }
