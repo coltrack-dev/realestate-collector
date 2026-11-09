@@ -72,10 +72,16 @@ func main() {
 			Capabilities: refresh.Capabilities{CountryCode: "UY", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, AllowsAutomatedRefresh: false},
 		},
 	})
+	coordinator.SetSourceQueryCache(settings.SourceQueryCacheTTL, settings.SourceQueryCacheMax)
 	defer coordinator.Close()
-	geoResolver, err := geo.NewFromFile(os.Getenv("GEO_BOUNDARIES_PATH"))
+	geoResolver, err := geo.NewFromFile(settings.GeoBoundariesPath)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if metadata, ok := geoResolver.(geo.BoundaryMetadata); ok {
+		slog.Info("geo_boundaries_loaded", "count", metadata.BoundaryCount(), "source", metadata.BoundarySource(), "version", metadata.BoundaryVersion())
+	} else {
+		slog.Warn("geo_boundaries_unavailable", "source", settings.GeoBoundariesPath)
 	}
 	server := &http.Server{
 		Addr: address, Handler: api.NewServerWithGeo(repository, details, coordinator, geoResolver),
@@ -83,7 +89,7 @@ func main() {
 		WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	go func() {
-		slog.Info("listings API listening", "address", address, "source_refresh_enabled", coordinator.Enabled(), "geo_boundaries_configured", os.Getenv("GEO_BOUNDARIES_PATH") != "")
+		slog.Info("listings API listening", "address", address, "source_refresh_enabled", coordinator.Enabled(), "geo_boundaries_configured", settings.GeoBoundariesPath != "", "geo_boundaries_path", settings.GeoBoundariesPath)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("API server: %v", err)
 		}

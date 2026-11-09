@@ -99,6 +99,8 @@ func newServer(repository Repository, details *DetailsService, coordinator *refr
 	mux.HandleFunc("/api/v1/source-refresh", server.sourceRefresh)
 	mux.HandleFunc("/api/v1/source-refresh/", server.sourceRefreshByID)
 	mux.HandleFunc("/api/v1/geo/resolve", server.resolveGeo)
+	mux.HandleFunc("/api/v1/geo/resolve-viewport", server.resolveGeoViewport)
+	mux.HandleFunc("/api/v1/source-refresh/viewport", server.sourceRefreshViewport)
 	return loggingMiddleware(mux)
 }
 
@@ -135,6 +137,39 @@ func (s *Server) resolveGeo(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, result)
 }
 
+func (s *Server) resolveGeoViewport(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(writer)
+		return
+	}
+	resolver, ok := s.Geo.(geo.ViewportResolver)
+	if !ok {
+		writeJSON(writer, http.StatusOK, geo.ViewportResult{Municipalities: []geo.ViewportMunicipality{}})
+		return
+	}
+	var payload struct {
+		BBox geo.BBox `json:"bbox"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 16<<10)).Decode(&payload); err != nil || !payload.BBox.Valid() {
+		writeError(writer, http.StatusBadRequest, "bbox coordinates are invalid")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), RequestTimeout)
+	defer cancel()
+	result, err := resolver.ResolveViewport(ctx, payload.BBox)
+	if err != nil {
+		slog.Warn("geo_viewport_resolve_failed", "error", err)
+		writeError(writer, http.StatusInternalServerError, "geographic resolution failed")
+		return
+	}
+	if s.Refresh != nil {
+		for i := range result.Municipalities {
+			result.Municipalities[i].AvailableSources = s.Refresh.AvailableSources(result.Municipalities[i].CountryCode, result.Municipalities[i].Municipality)
+		}
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
 type sourceRefreshRequest struct {
 	CountryCode  string         `json:"country_code"`
 	City         string         `json:"city"`
@@ -142,6 +177,95 @@ type sourceRefreshRequest struct {
 	Bounds       refresh.Bounds `json:"bbox"`
 	Operation    string         `json:"operation"`
 	PropertyType string         `json:"property_type"`
+}
+
+type viewportSourceRefreshRequest struct {
+	CountryCode  string   `json:"country_code"`
+	Bounds       geo.BBox `json:"bbox"`
+	Operation    string   `json:"operation"`
+	PropertyType string   `json:"property_type"`
+	MaxQueries   int      `json:"max_queries"`
+}
+
+func (s *Server) sourceRefreshViewport(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(writer)
+		return
+	}
+	if s.Refresh == nil {
+		writeJSON(writer, http.StatusNotImplemented, refresh.ViewportPlan{})
+		return
+	}
+	if !s.Refresh.Enabled() {
+		writeJSON(writer, http.StatusForbidden, refresh.ViewportPlan{})
+		return
+	}
+	var payload viewportSourceRefreshRequest
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 16<<10)).Decode(&payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid viewport refresh request")
+		return
+	}
+	if err := validateViewportRefresh(payload); err != nil {
+		slog.Warn("source_refresh_rejected", "reason", err.Error())
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	resolver, ok := s.Geo.(geo.ViewportResolver)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "viewport geographic resolver is unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), RequestTimeout)
+	defer cancel()
+	resolved, err := resolver.ResolveViewport(ctx, payload.Bounds)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "geographic resolution failed")
+		return
+	}
+	areas := make([]refresh.ViewportArea, 0, len(resolved.Municipalities))
+	center := ""
+	for _, area := range resolved.Municipalities {
+		if payload.CountryCode != "" && !strings.EqualFold(payload.CountryCode, area.CountryCode) {
+			continue
+		}
+		areas = append(areas, refresh.ViewportArea{CountryCode: area.CountryCode, Department: area.Department, Municipality: area.Municipality, DIVIPOLA: area.DIVIPOLA, OverlapArea: area.OverlapAreaM2, OverlapRatio: area.OverlapRatio})
+	}
+	if len(areas) > 0 {
+		centerPoint := geo.Point{Longitude: (payload.Bounds.MinLongitude + payload.Bounds.MaxLongitude) / 2, Latitude: (payload.Bounds.MinLatitude + payload.Bounds.MaxLatitude) / 2}
+		if centerResult, resolveErr := s.Geo.Resolve(ctx, centerPoint); resolveErr == nil {
+			center = centerResult.Municipality
+		}
+	}
+	clientKey := request.RemoteAddr
+	if host, _, splitErr := net.SplitHostPort(clientKey); splitErr == nil {
+		clientKey = host
+	}
+	plan := s.Refresh.RequestViewport(refresh.Request{CountryCode: payload.CountryCode, Bounds: refresh.Bounds{MinLongitude: payload.Bounds.MinLongitude, MaxLongitude: payload.Bounds.MaxLongitude, MinLatitude: payload.Bounds.MinLatitude, MaxLatitude: payload.Bounds.MaxLatitude}, Operation: payload.Operation, PropertyType: payload.PropertyType}, areas, center, payload.MaxQueries, clientKey)
+	writeJSON(writer, http.StatusAccepted, plan)
+}
+
+func validateViewportRefresh(payload viewportSourceRefreshRequest) error {
+	if payload.CountryCode != "CO" && payload.CountryCode != "UY" {
+		return errors.New("country_code must be CO or UY")
+	}
+	if payload.Operation != "" && payload.Operation != "SALE" && payload.Operation != "RENT" {
+		return errors.New("operation must be SALE, RENT, or empty for ALL")
+	}
+	if payload.PropertyType != "" {
+		switch payload.PropertyType {
+		case "APARTMENT", "HOUSE", "LAND", "COMMERCIAL":
+		default:
+			return errors.New("property_type is not supported or empty for ALL")
+		}
+	}
+	b := payload.Bounds
+	if !b.Valid() || b.MinLongitude < -180 || b.MaxLongitude > 180 || b.MinLatitude < -90 || b.MaxLatitude > 90 || b.MaxLongitude-b.MinLongitude > 15 || b.MaxLatitude-b.MinLatitude > 15 {
+		return errors.New("bbox coordinates are invalid or too large")
+	}
+	if payload.MaxQueries < 0 || payload.MaxQueries > 3 {
+		return errors.New("max_queries must be between 0 and 3")
+	}
+	return nil
 }
 
 func (s *Server) sourceRefresh(writer http.ResponseWriter, request *http.Request) {

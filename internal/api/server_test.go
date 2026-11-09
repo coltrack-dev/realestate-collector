@@ -185,6 +185,30 @@ func TestGeoResolveEndpointReturnsAdministrativeResult(t *testing.T) {
 	}
 }
 
+func TestGeoResolveViewportEndpointReturnsAllIntersectingMunicipalities(t *testing.T) {
+	resolver, err := geo.NewFromReader(strings.NewReader(`{"type":"FeatureCollection","features":[
+{"type":"Feature","properties":{"country_code":"CO","department":"Antioquia","municipality":"Rionegro","divipola":"05615"},"geometry":{"type":"Polygon","coordinates":[[[-76,6],[-75,6],[-75,7],[-76,7],[-76,6]]]}},
+{"type":"Feature","properties":{"country_code":"CO","department":"Antioquia","municipality":"Marinilla","divipola":"05440"},"geometry":{"type":"Polygon","coordinates":[[[-75,6],[-74.5,6],[-74.5,7],[-75,7],[-75,6]]]}}
+]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServerWithGeo(&fakeRepository{}, nil, nil, resolver)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/geo/resolve-viewport", strings.NewReader(`{"bbox":{"min_longitude":-75.2,"max_longitude":-74.8,"min_latitude":6.1,"max_latitude":6.4}}`))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result geo.ViewportResult
+	if err := json.NewDecoder(recorder.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Municipalities) != 2 {
+		t.Fatalf("unexpected viewport result: %+v", result)
+	}
+}
+
 func TestSourceRefreshIsDisabledWhenNoSourceIsPermitted(t *testing.T) {
 	repository := &fakeRepository{}
 	coordinator := refresh.NewCoordinator(nil, nil)

@@ -12,7 +12,10 @@ type Config struct {
 	ImageMaxBytes                    int64
 	ImageCacheTTL                    time.Duration
 	DetailsTTL                       time.Duration
+	SourceQueryCacheTTL              time.Duration
+	SourceQueryCacheMax              int
 	SourceRefreshEnabled             bool
+	GeoBoundariesPath                string
 	Delay                            time.Duration
 	MaxPages, MaxListings            int
 }
@@ -30,7 +33,10 @@ func Load() Config {
 		ImageMaxBytes:        20 * 1024 * 1024,
 		ImageCacheTTL:        24 * time.Hour,
 		DetailsTTL:           24 * time.Hour,
+		SourceQueryCacheTTL:  15 * time.Minute,
+		SourceQueryCacheMax:  128,
 		SourceRefreshEnabled: false,
+		GeoBoundariesPath:    "data/geo/colombia_municipalities.geojson",
 	}
 	if c.UserAgent == "" {
 		c.UserAgent = "realestate-collector/0.1"
@@ -64,8 +70,21 @@ func Load() Config {
 			c.DetailsTTL = x
 		}
 	}
+	if v := os.Getenv("SOURCE_QUERY_CACHE_TTL"); v != "" {
+		if x, e := time.ParseDuration(v); e == nil && x > 0 {
+			c.SourceQueryCacheTTL = x
+		}
+	}
+	if v := os.Getenv("SOURCE_QUERY_CACHE_MAX"); v != "" {
+		if x, e := strconv.Atoi(v); e == nil && x > 0 {
+			c.SourceQueryCacheMax = x
+		}
+	}
 	if v := os.Getenv("SOURCE_REFRESH_ENABLED"); v == "true" || v == "1" {
 		c.SourceRefreshEnabled = true
+	}
+	if v := os.Getenv("GEO_BOUNDARIES_PATH"); v != "" {
+		c.GeoBoundariesPath = v
 	}
 	return c
 }

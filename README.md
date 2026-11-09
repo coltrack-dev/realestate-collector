@@ -189,11 +189,24 @@ permitted. Source refresh creation is disabled by default; set
 endpoint is intended for localhost or a protected deployment and does not expose
 contact details.
 
-Geographic resolution uses an optional local GeoJSON FeatureCollection configured
-with `GEO_BOUNDARIES_PATH`. Each feature must provide `country_code`,
-`department`, and `municipality` properties and Polygon or MultiPolygon geometry.
-If the file is not configured, `/api/v1/geo/resolve` returns `resolution=UNKNOWN`
-and the map does not invent a municipality or start a nationwide refresh.
+Source refreshes use a bounded source-query cache (default TTL `15m`, maximum
+`128` keys). For city-only providers such as D.C Colombia, small map movements
+reuse the same normalized source query and do not imply that the original bbox
+is fully covered. Configure `SOURCE_QUERY_CACHE_TTL` and
+`SOURCE_QUERY_CACHE_MAX` when needed. A cache hit returns `SKIPPED` with reason
+`source_query_cache_hit`, while the frontend keeps showing PostgreSQL results.
+
+Geographic resolution uses the checked-in DANE MGN 2024 municipality snapshot at
+`data/geo/colombia_municipalities.geojson` by default. Override it with
+`GEO_BOUNDARIES_PATH` when using another explicitly validated GeoJSON source.
+Each feature provides the original DIVIPOLA code, department and municipality
+names, and Polygon or MultiPolygon geometry in EPSG:4326. On startup the API
+logs `geo_boundaries_loaded` with the feature count, source path and dataset
+version. The snapshot contains 1,121 DANE entities, including 1,102
+municipalities and 18 áreas no municipalizadas; it is locally stored and is not
+downloaded at API startup. If the file is not configured or unavailable,
+`/api/v1/geo/resolve` returns `resolution=UNKNOWN` and the map does not invent a
+municipality or start a nationwide refresh.
 
 External request and refresh lifecycle logging is documented in
 [`docs/HTTP_LOGGING.md`](docs/HTTP_LOGGING.md). HTTP request starts are DEBUG;

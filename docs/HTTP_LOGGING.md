@@ -23,3 +23,10 @@
 `refresh_cache_hit`, `refresh_deduplicated`) отделены от событий отдельных
 HTTP-попыток. Gallito остаётся отключённым для автоматического refresh по
 политике источника.
+
+Для повторных запросов без bbox используется bounded source-query cache. Его
+события: `source_query_cache_hit`, `source_query_cache_miss`,
+`source_query_cache_store` и `source_query_inflight_deduplicated`. По умолчанию
+TTL составляет 15 минут, размер — 128 записей; настройки задаются через
+`SOURCE_QUERY_CACHE_TTL` и `SOURCE_QUERY_CACHE_MAX`. Для D.C Colombia ключ
+включает источник, муниципалитет, operation и property type, но не bbox.

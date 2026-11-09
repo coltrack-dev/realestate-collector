@@ -5,7 +5,7 @@ import ListingCard from './components/ListingCard.vue'
 import ListingMap from './components/ListingMap.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
 import SiteHeader from './components/SiteHeader.vue'
-import { fetchListings, fetchStats, getSourceRefresh, requestSourceRefresh, resolveGeo, type GeoResolution } from './api/client'
+import { fetchListings, fetchStats, getSourceRefresh, requestViewportSourceRefresh, resolveGeo, type GeoResolution } from './api/client'
 import type { Listing, ListingFilters, Stats } from './types'
 import { getValidCoordinates } from './map/coordinates'
 import { expandBounds, geoCacheKey, GeoResultsCache, type GeoBounds } from './map/geoCache'
@@ -199,10 +199,9 @@ async function refreshSources(bounds: GeoBounds, requestSequence: number, cacheK
     return
   }
   const countryCode = filters.value.country_code || resolution.country_code
-  const city = resolution.municipality
-  logMapRefresh('map_viewport_resolved', { country_code: resolution.country_code, department: resolution.department ?? null, city: city ?? null, resolution: resolution.resolution, zoom, bounds })
-  logMapRefresh('map_refresh_considered', { country_code: countryCode, city: city ?? null, bounds })
-  if (resolution.resolution === 'UNKNOWN' || !city || !resolution.country_code) {
+  logMapRefresh('map_viewport_resolved', { country_code: resolution.country_code, department: resolution.department ?? null, city: resolution.municipality ?? null, resolution: resolution.resolution, zoom, bounds })
+  logMapRefresh('map_refresh_considered', { country_code: countryCode, city: resolution.municipality ?? null, bounds, planner: 'viewport-municipalities' })
+  if (resolution.resolution === 'UNKNOWN' || !resolution.country_code) {
     logMapRefresh('map_refresh_skipped', { reason: 'geography_unknown' })
     return
   }
@@ -210,35 +209,38 @@ async function refreshSources(bounds: GeoBounds, requestSequence: number, cacheK
     logMapRefresh('map_refresh_skipped', { reason: 'country_filter_mismatch', requested: filters.value.country_code, resolved: resolution.country_code })
     return
   }
-  if (resolution.available_sources && resolution.available_sources.length === 0) {
-    sourceRefreshStatus.value = 'No hay fuentes conectadas para esta ciudad.'
-    logMapRefresh('map_refresh_skipped', { reason: 'no_connected_sources', country_code: resolution.country_code, city })
-    return
-  }
   const refreshSequence = ++sourceRefreshSequence
   try {
 		sourceRefreshStatus.value = 'Buscando nuevas propiedades…'
-		logMapRefresh('map_refresh_post_started', { country_code: countryCode, city, operation: filters.value.operation || 'ALL', property_type: filters.value.property_type || 'ALL', bounds })
-    const result = await requestSourceRefresh({
+		logMapRefresh('map_refresh_post_started', { country_code: countryCode, city: resolution.municipality ?? null, operation: filters.value.operation || 'ALL', property_type: filters.value.property_type || 'ALL', bounds, max_queries: 3 })
+	    const plan = await requestViewportSourceRefresh({
       country_code: countryCode,
-      city,
 			operation: filters.value.operation,
 			property_type: filters.value.property_type,
+			max_queries: 3,
       bbox: { min_longitude: bounds.minLongitude, max_longitude: bounds.maxLongitude, min_latitude: bounds.minLatitude, max_latitude: bounds.maxLatitude },
     })
-    logMapRefresh('map_refresh_post_completed', { status: result.status, refresh_id: result.refresh_id ?? null, city })
+	    const planned = plan.queries.map((query) => query.result).filter((result): result is NonNullable<typeof result> => Boolean(result))
+	    const refreshIDs = planned.map((result) => result.refresh_id).filter((id): id is string => Boolean(id))
+	    logMapRefresh('map_refresh_post_completed', { status: planned.map((result) => result.status).join(','), refresh_ids: refreshIDs, planned_queries: plan.queries.length, skipped_queries: plan.skipped.length })
     if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
-    if (!result.refresh_id || result.status === 'SKIPPED' || result.status === 'UNSUPPORTED' || result.status === 'COOLDOWN') {
-			sourceRefreshStatus.value = result.status === 'UNSUPPORTED' ? 'Actualización limitada: la fuente no admite esta combinación.' : result.status === 'COOLDOWN' ? 'Actualización limitada temporalmente; inténtalo de nuevo en unos segundos.' : 'No se encontraron nuevas propiedades.'
-			logMapRefresh('map_refresh_skipped', { reason: `server_${result.status.toLowerCase()}`, city })
+	    if (refreshIDs.length === 0) {
+				const reasons = plan.skipped.map((query) => query.reason).filter(Boolean)
+				sourceRefreshStatus.value = reasons.includes('max_source_queries_per_viewport') ? 'Actualización limitada para esta área.' : reasons.includes('no_supported_source_or_recently_checked') ? 'Datos recientemente comprobados o sin fuente para esta zona.' : 'No se encontraron nuevas propiedades.'
+				logMapRefresh('map_refresh_skipped', { reason: reasons.join(',') || 'no_planned_queries', skipped_queries: plan.skipped.length })
       return
     }
-    for (let attempt = 0; attempt < 45; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-      if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
-      const status = await getSourceRefresh(result.refresh_id)
-      if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
-      if (status.status === 'DONE') {
+	    const terminalStatuses = await Promise.all(refreshIDs.map(async (id) => {
+	      for (let attempt = 0; attempt < 45; attempt++) {
+	        await new Promise((resolve) => setTimeout(resolve, 1000))
+	        if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return 'STALE' as const
+	        const status = await getSourceRefresh(id)
+	        if (status.status === 'DONE' || status.status === 'PARTIAL' || status.status === 'FAILED') return status.status
+	      }
+	      return 'TIMEOUT' as const
+	    }))
+	    if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
+	    if (terminalStatuses.includes('DONE')) {
         geoCache.delete(cacheKey)
         const previousTotal = stats.value?.total ?? null
         const refreshedStats = await loadStats()
@@ -247,19 +249,18 @@ async function refreshSources(bounds: GeoBounds, requestSequence: number, cacheK
           : 'No se encontraron nuevas propiedades.'
         await loadMapArea(bounds, true)
         return
-      }
-      if (status.status === 'PARTIAL') {
+    }
+    if (terminalStatuses.includes('PARTIAL')) {
         geoCache.delete(cacheKey)
         sourceRefreshStatus.value = 'Fuente comprobada; algunos resultados fueron parciales.'
         await loadStats()
         await loadMapArea(bounds, true)
         return
-      }
-      if (status.status === 'FAILED') { sourceRefreshStatus.value = ''; return }
     }
+    if (terminalStatuses.includes('FAILED')) { sourceRefreshStatus.value = 'No se pudieron actualizar algunas fuentes.'; return }
     sourceRefreshStatus.value = ''
   } catch (caught) {
-    logMapRefresh('map_refresh_post_completed', { status: 'ERROR', reason: caught instanceof Error ? caught.message : 'request_failed', city })
+    logMapRefresh('map_refresh_post_completed', { status: 'ERROR', reason: caught instanceof Error ? caught.message : 'request_failed' })
     if (refreshSequence === sourceRefreshSequence) sourceRefreshStatus.value = ''
   }
 }

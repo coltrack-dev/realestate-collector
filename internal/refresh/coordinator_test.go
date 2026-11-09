@@ -42,6 +42,34 @@ func (s errorSource) Collect(context.Context, Request, int) (CollectResult, erro
 	return CollectResult{}, errors.New("mock provider failure")
 }
 
+type emptySource struct{ name string }
+
+func (s emptySource) Name() string { return s.name }
+func (s emptySource) Collect(context.Context, Request, int) (CollectResult, error) {
+	return CollectResult{Complete: true}, nil
+}
+
+type blockingSource struct {
+	calls   *int
+	mu      *sync.Mutex
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s blockingSource) Name() string { return "blocking" }
+func (s blockingSource) Collect(context.Context, Request, int) (CollectResult, error) {
+	s.mu.Lock()
+	*s.calls++
+	s.mu.Unlock()
+	select {
+	case <-s.started:
+	default:
+		close(s.started)
+	}
+	<-s.release
+	return CollectResult{Complete: false, PartialReason: "provider_pagination_unknown"}, nil
+}
+
 type memorySaver struct {
 	mu       sync.Mutex
 	listings map[string]model.Listing
@@ -140,7 +168,7 @@ func TestCoordinatorPlansUnfilteredSearchOnlyForCapableSources(t *testing.T) {
 			mu.Unlock()
 			return testSource{name: "unsupported-all", calls: &calls, mu: &mu, complete: false}
 		}},
-		{Name: "all-capable", Capabilities: Capabilities{CountryCode: "CO", SupportsCity: true, SupportsUnfilteredSearch: true, AllowsAutomatedRefresh: true}, Factory: func(Request) Source {
+		{Name: "all-capable", Capabilities: Capabilities{CountryCode: "CO", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, SupportsUnfilteredSearch: true, AllowsAutomatedRefresh: true}, Factory: func(Request) Source {
 			return testSource{name: "all-capable", calls: &allCalls, mu: &mu, complete: false}
 		}},
 	})
@@ -200,7 +228,137 @@ func TestCoordinatorIdentityIncludesAppliedFilters(t *testing.T) {
 	}
 }
 
-func TestCoordinatorDoesNotCachePartialOrFailedSave(t *testing.T) {
+func TestSourceQueryCacheIgnoresBboxForCityOnlySource(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	c := NewCoordinator(&testSaver{}, []Registration{{Name: "dccolombia", Capabilities: Capabilities{CountryCode: "CO", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, SupportsUnfilteredSearch: true, AllowsAutomatedRefresh: true}, Factory: func(Request) Source {
+		return testSource{name: "dccolombia", calls: &calls, mu: &mu, complete: false}
+	}}})
+	defer c.Close()
+	c.clientInterval = 0
+	c.SetSourceQueryCache(20*time.Millisecond, 8)
+	first := c.Request(testRequest(), "cache-1")
+	waitForStatus(t, c, first.RefreshID, StatusPartial)
+	for move := 0; move < 5; move++ {
+		secondRequest := testRequest()
+		secondRequest.Bounds.MinLongitude -= float64(move+1) * 0.1
+		second := c.Request(secondRequest, fmt.Sprintf("cache-move-%d", move))
+		if second.Status != StatusSkipped || second.Reason != "source_query_cache_hit" {
+			t.Fatalf("same city query was not cached on move %d: %+v", move, second)
+		}
+	}
+	changedFilter := testRequest()
+	changedFilter.Operation = "RENT"
+	third := c.Request(changedFilter, "cache-3")
+	if third.Status != StatusQueued {
+		t.Fatalf("changed operation did not create a query: %+v", third)
+	}
+	waitForStatus(t, c, third.RefreshID, StatusPartial)
+	changedCity := testRequest()
+	changedCity.City = "Cartagena"
+	fourth := c.Request(changedCity, "cache-4")
+	if fourth.Status != StatusQueued {
+		t.Fatalf("changed municipality did not create a query: %+v", fourth)
+	}
+	waitForStatus(t, c, fourth.RefreshID, StatusPartial)
+	time.Sleep(30 * time.Millisecond)
+	expired := c.Request(changedCity, "cache-5")
+	if expired.Status != StatusQueued {
+		t.Fatalf("expired source query was not refreshed: %+v", expired)
+	}
+	waitForStatus(t, c, expired.RefreshID, StatusPartial)
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 4 {
+		t.Fatalf("external query count=%d, want 4", got)
+	}
+}
+
+func TestSourceQueryCacheStoresEmptySuccessfulResults(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	c := NewCoordinator(&testSaver{}, []Registration{{Name: "dccolombia", Capabilities: Capabilities{CountryCode: "CO", SupportsCity: true, AllowsAutomatedRefresh: true}, Factory: func(Request) Source {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return emptySource{name: "dccolombia"}
+	}}})
+	defer c.Close()
+	c.clientInterval = 0
+	first := c.Request(testRequest(), "empty-1")
+	waitForStatus(t, c, first.RefreshID, StatusPartial)
+	second := c.Request(testRequest(), "empty-2")
+	if second.Status != StatusSkipped {
+		t.Fatalf("empty successful query was not cached: %+v", second)
+	}
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("empty query calls=%d, want 1", got)
+	}
+}
+
+func TestSourceQueryErrorsAreNotCached(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	c := NewCoordinator(&testSaver{}, []Registration{{Name: "dccolombia", Capabilities: Capabilities{CountryCode: "CO", SupportsCity: true, AllowsAutomatedRefresh: true}, Factory: func(Request) Source {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return errorSource{name: "dccolombia"}
+	}}})
+	defer c.Close()
+	c.clientInterval = 0
+	first := c.Request(testRequest(), "error-1")
+	waitForStatus(t, c, first.RefreshID, StatusFailed)
+	second := c.Request(testRequest(), "error-2")
+	if second.Status != StatusQueued {
+		t.Fatalf("failed source query was cached: %+v", second)
+	}
+	waitForStatus(t, c, second.RefreshID, StatusFailed)
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("failed source calls=%d, want 2", got)
+	}
+}
+
+func TestSourceQueryInflightDeduplicationAcrossBboxes(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	started := make(chan struct{})
+	release := make(chan struct{})
+	c := NewCoordinator(&testSaver{}, []Registration{{Name: "dccolombia", Capabilities: Capabilities{CountryCode: "CO", SupportsCity: true, AllowsAutomatedRefresh: true}, Factory: func(Request) Source {
+		return blockingSource{calls: &calls, mu: &mu, started: started, release: release}
+	}}})
+	defer c.Close()
+	c.clientInterval = 0
+	first := c.Request(testRequest(), "inflight-1")
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("source did not start")
+	}
+	secondRequest := testRequest()
+	secondRequest.Bounds.MinLatitude += 0.1
+	second := c.Request(secondRequest, "inflight-2")
+	if second.Status != StatusQueued || second.RefreshID != first.RefreshID {
+		t.Fatalf("inflight query was not deduplicated: first=%+v second=%+v", first, second)
+	}
+	close(release)
+	waitForStatus(t, c, first.RefreshID, StatusPartial)
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("concurrent external queries=%d, want 1", got)
+	}
+}
+
+func TestCoordinatorCachesSuccessfulPartialButNotFailedSave(t *testing.T) {
 	for _, test := range []struct {
 		name           string
 		sourceComplete bool
@@ -217,8 +375,11 @@ func TestCoordinatorDoesNotCachePartialOrFailedSave(t *testing.T) {
 			first := c.Request(testRequest(), "one")
 			waitForStatus(t, c, first.RefreshID, StatusPartial, StatusFailed)
 			second := c.Request(testRequest(), "two")
-			if second.Status != StatusQueued {
-				t.Fatalf("second status=%s, expected a new job", second.Status)
+			if test.saverFails && second.Status != StatusQueued {
+				t.Fatalf("failed save status=%s, expected a new job", second.Status)
+			}
+			if !test.saverFails && second.Status != StatusSkipped {
+				t.Fatalf("successful partial status=%s, expected source-query cache hit", second.Status)
 			}
 		})
 	}
@@ -283,6 +444,34 @@ func TestCoordinatorExecutesAdapterHTTPRequest(t *testing.T) {
 	}
 }
 
+func TestSourceQueryCachePreventsRepeatedHTTPForCitySource(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	var calls int
+	var mu sync.Mutex
+	coordinator := NewCoordinator(&testSaver{}, []Registration{{Name: "dccolombia", Capabilities: Capabilities{CountryCode: "CO", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, AllowsAutomatedRefresh: true}, Factory: func(Request) Source {
+		return httpBackedSource{endpoint: server.URL, calls: &calls, mu: &mu}
+	}}})
+	defer coordinator.Close()
+	coordinator.clientInterval = 0
+	first := coordinator.Request(testRequest(), "http-cache-1")
+	waitForStatus(t, coordinator, first.RefreshID, StatusPartial)
+	secondRequest := testRequest()
+	secondRequest.Bounds.MaxLatitude += 0.2
+	second := coordinator.Request(secondRequest, "http-cache-2")
+	if second.Status != StatusSkipped || second.Reason != "source_query_cache_hit" {
+		t.Fatalf("HTTP source query was not cached: %+v", second)
+	}
+	if requests != 1 || calls != 1 {
+		t.Fatalf("external requests=%d adapter calls=%d, want one each", requests, calls)
+	}
+}
+
 func TestCoordinatorKeepsSuccessfulSourceWhenAnotherFails(t *testing.T) {
 	good := testSource{name: "good", calls: new(int), mu: &sync.Mutex{}, complete: true}
 	c := NewCoordinator(&testSaver{}, []Registration{
@@ -319,6 +508,7 @@ func TestCoordinatorReportsInsertedUnchangedAndUpdatedListings(t *testing.T) {
 		return fixedSource{name: "mock", listings: items}
 	}}})
 	defer c.Close()
+	c.SetSourceQueryCache(time.Nanosecond, 128)
 	first := c.Request(testRequest(), "counter-1")
 	waitForStatus(t, c, first.RefreshID, StatusPartial)
 	status, _ := c.Get(first.RefreshID)

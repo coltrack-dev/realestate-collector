@@ -4,7 +4,8 @@ import { spawn } from 'node:child_process'
 const webRoot = new URL('../', import.meta.url).pathname
 const mockPort = 8087
 const webPort = 5174
-let refreshRequests = []
+let viewportRefreshRequests = []
+let plannedSourceQueries = []
 let statusRequests = 0
 
 const listing = {
@@ -55,18 +56,26 @@ const backend = createServer((request, response) => {
         : { resolution: 'UNKNOWN' }))
     return
   }
-  if (request.method === 'POST' && url.pathname === '/api/v1/source-refresh') {
+  if (request.method === 'POST' && url.pathname === '/api/v1/source-refresh/viewport') {
     let body = ''
     request.on('data', (chunk) => { body += chunk })
     request.on('end', () => {
-      refreshRequests.push(JSON.parse(body))
+      const payload = JSON.parse(body)
+      viewportRefreshRequests.push(payload)
       if (lastViewport) {
         importedListing.longitude = lastViewport.longitude
         importedListing.latitude = lastViewport.latitude
       }
       if (!inventory.some((item) => item.id === importedListing.id)) inventory.push(importedListing)
       response.statusCode = 202
-      response.end(JSON.stringify({ status: 'QUEUED', refresh_id: `mock-${refreshRequests.length}` }))
+      const first = payload.country_code === 'CO' ? 'Bogotá D.C.' : 'Montevideo'
+      const second = payload.country_code === 'CO' ? 'Soacha' : 'Canelones'
+      const plan = [first, second].map((municipality, index) => {
+        const refreshId = `mock-${plannedSourceQueries.length + index + 1}`
+        plannedSourceQueries.push({ refreshId, municipality, payload })
+        return { area: { country_code: payload.country_code, municipality, overlap_area_m2: 100 - index, overlap_ratio: 0.5 - index / 10 }, result: { status: 'QUEUED', refresh_id: refreshId } }
+      })
+      response.end(JSON.stringify({ queries: plan, skipped: [] }))
     })
     return
   }
@@ -129,7 +138,7 @@ try {
     return true;
   `, args: [] })
   console.log('map tab selected')
-  await waitFor(() => refreshRequests.length === 0)
+  await waitFor(() => viewportRefreshRequests.length === 0)
   await webdriver('POST', `/session/${session}/execute/sync`, { script: `
     const set = (selector, value) => { const element = document.querySelector(selector); element.value = value; element.dispatchEvent(new Event('change', { bubbles: true })); };
     set('select[aria-label="País"]', 'CO');
@@ -160,11 +169,12 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 5000))
   const diagnostics = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return window.__mapRefreshDiagnostics ?? []`, args: [] })
   console.log('diagnostic refresh events', diagnostics.filter((entry) => entry.event.includes('refresh')).map((entry) => entry.details))
-  await waitFor(() => refreshRequests.length >= 1)
-  const payload = refreshRequests[0]
-  if (payload.country_code !== 'CO' || payload.city !== 'Bogotá D.C.' || payload.operation !== 'SALE' || payload.property_type !== 'APARTMENT') {
+  await waitFor(() => viewportRefreshRequests.length >= 1)
+  const payload = viewportRefreshRequests[0]
+  if (payload.country_code !== 'CO' || payload.operation !== 'SALE' || payload.property_type !== 'APARTMENT' || payload.max_queries !== 3) {
     throw new Error(`unexpected refresh payload: ${JSON.stringify(payload)}`)
   }
+  if (plannedSourceQueries.filter((query) => query.payload === payload).length < 2) throw new Error('viewport planner did not create multiple municipality queries')
   await waitFor(async () => {
     const bodyText = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.body.textContent.includes('Apartamento incorporado por refresh')`, args: [] })
     return bodyText === true
@@ -172,7 +182,7 @@ try {
   if (!diagnostics.some((entry) => entry.event === 'map_moveend') || !diagnostics.some((entry) => entry.event === 'map_refresh_post_started')) {
     throw new Error(`missing map refresh diagnostics: ${JSON.stringify(diagnostics)}`)
   }
-  const beforeAllFilters = refreshRequests.length
+  const beforeAllFilters = viewportRefreshRequests.length
   await webdriver('POST', `/session/${session}/execute/sync`, { script: `
     const set = (selector, value) => { const element = document.querySelector(selector); element.value = value; element.dispatchEvent(new Event('change', { bubbles: true })); };
     set('select[aria-label="Operación"]', '');
@@ -181,12 +191,12 @@ try {
     return true;
   `, args: [] })
   for (let index = 0; index < 3; index += 1) await clickSelector('.maplibregl-ctrl-zoom-in')
-  await waitFor(() => refreshRequests.length > beforeAllFilters, 10000)
-  const allPayload = refreshRequests[refreshRequests.length - 1]
-  if (allPayload.country_code !== 'CO' || allPayload.city !== 'Bogotá D.C.' || allPayload.operation !== '' || allPayload.property_type !== '') {
+  await waitFor(() => viewportRefreshRequests.length > beforeAllFilters, 10000)
+  const allPayload = viewportRefreshRequests[viewportRefreshRequests.length - 1]
+  if (allPayload.country_code !== 'CO' || allPayload.operation !== '' || allPayload.property_type !== '' || allPayload.max_queries !== 3) {
     throw new Error(`unexpected ALL refresh payload: ${JSON.stringify(allPayload)}`)
   }
-  console.log(JSON.stringify({ browser: 'firefox', sourceRefreshPosts: refreshRequests.length, statusPolls: statusRequests, payload, allPayload }))
+  console.log(JSON.stringify({ browser: 'firefox', viewportRefreshPosts: viewportRefreshRequests.length, plannedSourceQueries: plannedSourceQueries.length, statusPolls: statusRequests, payload, allPayload }))
 } finally {
   if (session) await webdriver('DELETE', `/session/${session}`)
   geckodriver?.kill('SIGTERM')

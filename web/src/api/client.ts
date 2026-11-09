@@ -12,7 +12,27 @@ export interface SourceRefreshResponse {
   status: 'SKIPPED' | 'QUEUED' | 'RUNNING' | 'COOLDOWN' | 'UNSUPPORTED' | 'PARTIAL' | 'DONE' | 'FAILED'
   refresh_id?: string
   retry_after_seconds?: number
+  reason?: string
   error?: string
+}
+
+export interface ViewportSourceRefreshRequest {
+  country_code: string
+  operation?: string
+  property_type?: string
+  max_queries?: number
+  bbox: { min_longitude: number; max_longitude: number; min_latitude: number; max_latitude: number }
+}
+
+export interface ViewportRefreshQuery {
+  area: { country_code: string; department?: string; municipality?: string; divipola?: string; overlap_area_m2: number; overlap_ratio: number }
+  result?: SourceRefreshResponse
+  reason?: string
+}
+
+export interface ViewportRefreshPlan {
+  queries: ViewportRefreshQuery[]
+  skipped: ViewportRefreshQuery[]
 }
 
 export interface GeoResolution {
@@ -70,6 +90,10 @@ export function fetchStats(): Promise<Stats> {
 
 export function requestSourceRefresh(payload: SourceRefreshRequest, signal?: AbortSignal): Promise<SourceRefreshResponse> {
   return request<SourceRefreshResponse>('/source-refresh', { method: 'POST', body: JSON.stringify(payload), signal, headers: { 'Content-Type': 'application/json' } })
+}
+
+export function requestViewportSourceRefresh(payload: ViewportSourceRefreshRequest, signal?: AbortSignal): Promise<ViewportRefreshPlan> {
+  return request<ViewportRefreshPlan>('/source-refresh/viewport', { method: 'POST', body: JSON.stringify(payload), signal, headers: { 'Content-Type': 'application/json' } })
 }
 
 export function getSourceRefresh(id: string, signal?: AbortSignal): Promise<SourceRefreshResponse> {
