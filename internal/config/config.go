@@ -16,27 +16,33 @@ type Config struct {
 	SourceQueryCacheMax              int
 	SourceRefreshEnabled             bool
 	GeoBoundariesPath                string
+	GeoUruguayDepartmentsPath        string
+	GeoUruguayMunicipalitiesPath     string
+	GeoUruguayLocalitiesPath         string
 	Delay                            time.Duration
 	MaxPages, MaxListings            int
 }
 
 func Load() Config {
 	c := Config{
-		DatabaseURL:          os.Getenv("DATABASE_URL"),
-		UserAgent:            os.Getenv("USER_AGENT"),
-		AuthMode:             "none",
-		Delay:                3 * time.Second,
-		MaxPages:             3,
-		MaxListings:          50,
-		ImageStorageMode:     "EXTERNAL_URL",
-		ImageCacheDir:        "./var/image-cache",
-		ImageMaxBytes:        20 * 1024 * 1024,
-		ImageCacheTTL:        24 * time.Hour,
-		DetailsTTL:           24 * time.Hour,
-		SourceQueryCacheTTL:  15 * time.Minute,
-		SourceQueryCacheMax:  128,
-		SourceRefreshEnabled: false,
-		GeoBoundariesPath:    "data/geo/colombia_municipalities.geojson",
+		DatabaseURL:                  os.Getenv("DATABASE_URL"),
+		UserAgent:                    os.Getenv("USER_AGENT"),
+		AuthMode:                     "none",
+		Delay:                        3 * time.Second,
+		MaxPages:                     3,
+		MaxListings:                  50,
+		ImageStorageMode:             "EXTERNAL_URL",
+		ImageCacheDir:                "./var/image-cache",
+		ImageMaxBytes:                20 * 1024 * 1024,
+		ImageCacheTTL:                24 * time.Hour,
+		DetailsTTL:                   24 * time.Hour,
+		SourceQueryCacheTTL:          15 * time.Minute,
+		SourceQueryCacheMax:          128,
+		SourceRefreshEnabled:         false,
+		GeoBoundariesPath:            "data/geo/colombia_municipalities.geojson",
+		GeoUruguayDepartmentsPath:    "data/geo/uruguay_departments.geojson",
+		GeoUruguayMunicipalitiesPath: "data/geo/uruguay_municipalities.geojson",
+		GeoUruguayLocalitiesPath:     "data/geo/uruguay_localities.geojson",
 	}
 	if c.UserAgent == "" {
 		c.UserAgent = "realestate-collector/0.1"
@@ -85,6 +91,15 @@ func Load() Config {
 	}
 	if v := os.Getenv("GEO_BOUNDARIES_PATH"); v != "" {
 		c.GeoBoundariesPath = v
+	}
+	if v := os.Getenv("GEO_URUGUAY_DEPARTMENTS_PATH"); v != "" {
+		c.GeoUruguayDepartmentsPath = v
+	}
+	if v := os.Getenv("GEO_URUGUAY_MUNICIPALITIES_PATH"); v != "" {
+		c.GeoUruguayMunicipalitiesPath = v
+	}
+	if v := os.Getenv("GEO_URUGUAY_LOCALITIES_PATH"); v != "" {
+		c.GeoUruguayLocalitiesPath = v
 	}
 	return c
 }

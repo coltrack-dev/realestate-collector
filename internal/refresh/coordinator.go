@@ -44,6 +44,7 @@ type Request struct {
 	CountryCode  string
 	City         string
 	Department   string
+	Locality     string
 	Bounds       Bounds
 	Operation    string
 	PropertyType string
@@ -67,6 +68,7 @@ type Capabilities struct {
 	SupportsBBox         bool
 	SupportsCity         bool
 	SupportsDepartment   bool
+	SupportsLocality     bool
 	SupportsOperation    bool
 	SupportsPropertyType bool
 	// SupportsUnfilteredSearch means the provider accepts an omitted
@@ -125,8 +127,8 @@ type cacheEntry struct {
 }
 
 type requestIdentity struct {
-	Source, CountryCode, City, Department, Operation, PropertyType string
-	MinLongitude, MaxLongitude, MinLatitude, MaxLatitude           float64
+	Source, CountryCode, City, Department, Locality, Operation, PropertyType string
+	MinLongitude, MaxLongitude, MinLatitude, MaxLatitude                     float64
 }
 
 type sourceQueryCacheEntry struct {
@@ -279,13 +281,13 @@ func (c *Coordinator) request(request Request, clientKey string, enforceClientTh
 		if !capability.AllowsAutomatedRefresh || !strings.EqualFold(capability.CountryCode, request.CountryCode) {
 			continue
 		}
-		if !capability.SupportsBBox && !capability.SupportsCity {
+		if !capability.SupportsBBox && !capability.SupportsCity && !capability.SupportsDepartment && !capability.SupportsLocality {
 			continue
 		}
 		if !supportsMunicipality(capability, request.City) {
 			continue
 		}
-		if capability.SupportsCity && strings.TrimSpace(request.City) == "" && !capability.SupportsBBox {
+		if capability.SupportsCity && strings.TrimSpace(request.City) == "" && !capability.SupportsLocality && !capability.SupportsDepartment && !capability.SupportsBBox {
 			continue
 		}
 		if (request.Operation == "" || request.PropertyType == "") && !capability.SupportsUnfilteredSearch {
@@ -531,6 +533,9 @@ func sourceQueryIdentityFor(request Request, source string, capabilities Capabil
 	if !capabilities.SupportsCity {
 		identity.City = ""
 	}
+	if !capabilities.SupportsLocality {
+		identity.Locality = ""
+	}
 	if !capabilities.SupportsOperation {
 		identity.Operation = ""
 	}
@@ -573,6 +578,7 @@ func normalizeRequest(request Request) Request {
 	request.CountryCode = strings.ToUpper(strings.TrimSpace(request.CountryCode))
 	request.City = strings.TrimSpace(request.City)
 	request.Department = strings.TrimSpace(request.Department)
+	request.Locality = strings.TrimSpace(request.Locality)
 	request.Operation = strings.ToUpper(strings.TrimSpace(request.Operation))
 	request.PropertyType = strings.ToUpper(strings.TrimSpace(request.PropertyType))
 	return request
@@ -580,7 +586,7 @@ func normalizeRequest(request Request) Request {
 
 func requestIdentityFor(request Request, source string) requestIdentity {
 	request = normalizeRequest(request)
-	return requestIdentity{Source: strings.ToLower(strings.TrimSpace(source)), CountryCode: request.CountryCode, City: strings.ToLower(request.City), Department: strings.ToLower(request.Department), Operation: request.Operation, PropertyType: request.PropertyType, MinLongitude: request.Bounds.MinLongitude, MaxLongitude: request.Bounds.MaxLongitude, MinLatitude: request.Bounds.MinLatitude, MaxLatitude: request.Bounds.MaxLatitude}
+	return requestIdentity{Source: strings.ToLower(strings.TrimSpace(source)), CountryCode: request.CountryCode, City: strings.ToLower(request.City), Department: strings.ToLower(request.Department), Locality: strings.ToLower(request.Locality), Operation: request.Operation, PropertyType: request.PropertyType, MinLongitude: request.Bounds.MinLongitude, MaxLongitude: request.Bounds.MaxLongitude, MinLatitude: request.Bounds.MinLatitude, MaxLatitude: request.Bounds.MaxLatitude}
 }
 func newID() string {
 	var bytes [12]byte

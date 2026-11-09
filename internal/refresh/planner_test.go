@@ -38,3 +38,18 @@ func TestRequestViewportPrioritizesCenterAndLimitsSourceQueries(t *testing.T) {
 		t.Fatalf("cache was not respected: %+v", plan)
 	}
 }
+
+func TestRequestViewportDoesNotTreatUruguayGeographyAsSourceCoverage(t *testing.T) {
+	c := NewCoordinator(&testSaver{}, []Registration{{
+		Name:         "gallito",
+		Capabilities: Capabilities{CountryCode: "UY", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, AllowsAutomatedRefresh: false},
+		Factory:      func(Request) Source { return testSource{name: "gallito"} },
+	}})
+	defer c.Close()
+	plan := c.RequestViewport(testRequest(), []ViewportArea{{
+		Level: "LOCALITY", ID: "UYMAPDE", CountryCode: "UY", Department: "MALDONADO", Municipality: "MALDONADO", Locality: "PUNTA DEL ESTE", OverlapRatio: 1,
+	}}, "MALDONADO", 3, "uy-planner")
+	if len(plan.Queries) != 0 || len(plan.Skipped) != 1 || plan.Skipped[0].Reason != "no_source_geography_filter" {
+		t.Fatalf("disabled Uruguay source was planned: %+v", plan)
+	}
+}

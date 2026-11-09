@@ -9,12 +9,18 @@ import (
 // ViewportArea is the geographic result for one municipality intersecting a
 // map viewport. Overlap is already calculated by the geographic resolver.
 type ViewportArea struct {
-	CountryCode  string
-	Department   string
-	Municipality string
-	DIVIPOLA     string
-	OverlapArea  float64
-	OverlapRatio float64
+	Level          string
+	ID             string
+	CountryCode    string
+	Department     string
+	DepartmentID   string
+	Municipality   string
+	MunicipalityID string
+	Locality       string
+	LocalityID     string
+	DIVIPOLA       string
+	OverlapArea    float64
+	OverlapRatio   float64
 }
 
 type ViewportQuery struct {
@@ -58,7 +64,24 @@ func (c *Coordinator) RequestViewport(base Request, areas []ViewportArea, center
 		if req.CountryCode == "" {
 			req.CountryCode = area.CountryCode
 		}
-		req.CountryCode, req.City, req.Department = area.CountryCode, area.Municipality, area.Department
+		req.CountryCode, req.City, req.Department, req.Locality = area.CountryCode, area.Municipality, area.Department, area.Locality
+		if area.CountryCode == "" {
+			continue
+		}
+		filterLevel, ok := c.sourceFilterLevel(req, area)
+		if !ok {
+			plan.Skipped = append(plan.Skipped, ViewportQuery{Area: area, Reason: "no_source_geography_filter"})
+			continue
+		}
+		if filterLevel != "LOCALITY" {
+			req.Locality = ""
+		}
+		if filterLevel != "MUNICIPALITY" {
+			req.City = ""
+		}
+		if filterLevel != "DEPARTMENT" {
+			req.Department = ""
+		}
 		count := c.newSourceQueryCount(req)
 		if count == 0 {
 			plan.Skipped = append(plan.Skipped, ViewportQuery{Area: area, Reason: "no_supported_source_or_recently_checked"})
@@ -79,6 +102,36 @@ func (c *Coordinator) RequestViewport(base Request, areas []ViewportArea, center
 	return plan
 }
 
+// sourceFilterLevel chooses the most precise geographic filter supported by at
+// least one enabled source for this area. It intentionally does not treat a
+// locality as a municipality or fall back to a nationwide query.
+func (c *Coordinator) sourceFilterLevel(request Request, area ViewportArea) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, registration := range c.registrations {
+		capability := registration.Capabilities
+		if !capability.AllowsAutomatedRefresh || !strings.EqualFold(capability.CountryCode, area.CountryCode) {
+			continue
+		}
+		if !supportsMunicipality(capability, area.Municipality) {
+			continue
+		}
+		if capability.SupportsLocality && area.Locality != "" {
+			return "LOCALITY", true
+		}
+		if capability.SupportsCity && area.Municipality != "" {
+			return "MUNICIPALITY", true
+		}
+		if capability.SupportsDepartment && area.Department != "" {
+			return "DEPARTMENT", true
+		}
+		if capability.SupportsBBox {
+			return "BBOX", true
+		}
+	}
+	return "", false
+}
+
 func (c *Coordinator) newSourceQueryCount(request Request) int {
 	request = normalizeRequest(request)
 	if !request.Bounds.Valid() {
@@ -93,7 +146,7 @@ func (c *Coordinator) newSourceQueryCount(request Request) int {
 		if !capability.AllowsAutomatedRefresh || !strings.EqualFold(capability.CountryCode, request.CountryCode) || !supportsMunicipality(capability, request.City) {
 			continue
 		}
-		if !capability.SupportsBBox && !capability.SupportsCity {
+		if !capability.SupportsBBox && !capability.SupportsCity && !capability.SupportsDepartment && !capability.SupportsLocality {
 			continue
 		}
 		if request.Operation == "" || request.PropertyType == "" {

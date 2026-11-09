@@ -74,12 +74,17 @@ func main() {
 	})
 	coordinator.SetSourceQueryCache(settings.SourceQueryCacheTTL, settings.SourceQueryCacheMax)
 	defer coordinator.Close()
-	geoResolver, err := geo.NewFromFile(settings.GeoBoundariesPath)
+	geoResolver, err := geo.NewFromFiles([]string{
+		settings.GeoBoundariesPath,
+		settings.GeoUruguayDepartmentsPath,
+		settings.GeoUruguayMunicipalitiesPath,
+		settings.GeoUruguayLocalitiesPath,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	if metadata, ok := geoResolver.(geo.BoundaryMetadata); ok {
-		slog.Info("geo_boundaries_loaded", "count", metadata.BoundaryCount(), "source", metadata.BoundarySource(), "version", metadata.BoundaryVersion())
+		slog.Info("geo_boundaries_loaded", "count", metadata.BoundaryCount(), "counts", metadata.BoundaryCounts(), "source", metadata.BoundarySource(), "version", metadata.BoundaryVersion())
 	} else {
 		slog.Warn("geo_boundaries_unavailable", "source", settings.GeoBoundariesPath)
 	}

@@ -166,6 +166,9 @@ func (s *Server) resolveGeoViewport(writer http.ResponseWriter, request *http.Re
 		for i := range result.Municipalities {
 			result.Municipalities[i].AvailableSources = s.Refresh.AvailableSources(result.Municipalities[i].CountryCode, result.Municipalities[i].Municipality)
 		}
+		for i := range result.Areas {
+			result.Areas[i].AvailableSources = s.Refresh.AvailableSources(result.Areas[i].CountryCode, result.Areas[i].Municipality)
+		}
 	}
 	writeJSON(writer, http.StatusOK, result)
 }
@@ -222,13 +225,22 @@ func (s *Server) sourceRefreshViewport(writer http.ResponseWriter, request *http
 		writeError(writer, http.StatusInternalServerError, "geographic resolution failed")
 		return
 	}
-	areas := make([]refresh.ViewportArea, 0, len(resolved.Municipalities))
+	areas := make([]refresh.ViewportArea, 0, len(resolved.Areas))
 	center := ""
-	for _, area := range resolved.Municipalities {
+	geoAreas := resolved.Areas
+	if len(geoAreas) == 0 {
+		// Keep compatibility with resolvers compiled against the pre-hierarchy
+		// response shape.
+		geoAreas = make([]geo.ViewportArea, 0, len(resolved.Municipalities))
+		for _, municipality := range resolved.Municipalities {
+			geoAreas = append(geoAreas, geo.ViewportArea{Level: "MUNICIPALITY", ID: municipality.DIVIPOLA, CountryCode: municipality.CountryCode, Department: municipality.Department, Municipality: municipality.Municipality, OverlapAreaM2: municipality.OverlapAreaM2, OverlapRatio: municipality.OverlapRatio})
+		}
+	}
+	for _, area := range geoAreas {
 		if payload.CountryCode != "" && !strings.EqualFold(payload.CountryCode, area.CountryCode) {
 			continue
 		}
-		areas = append(areas, refresh.ViewportArea{CountryCode: area.CountryCode, Department: area.Department, Municipality: area.Municipality, DIVIPOLA: area.DIVIPOLA, OverlapArea: area.OverlapAreaM2, OverlapRatio: area.OverlapRatio})
+		areas = append(areas, refresh.ViewportArea{Level: area.Level, ID: area.ID, CountryCode: area.CountryCode, Department: area.Department, DepartmentID: area.DepartmentID, Municipality: area.Municipality, MunicipalityID: area.MunicipalityID, Locality: area.Locality, LocalityID: area.LocalityID, DIVIPOLA: area.ID, OverlapArea: area.OverlapAreaM2, OverlapRatio: area.OverlapRatio})
 	}
 	if len(areas) > 0 {
 		centerPoint := geo.Point{Longitude: (payload.Bounds.MinLongitude + payload.Bounds.MaxLongitude) / 2, Latitude: (payload.Bounds.MinLatitude + payload.Bounds.MaxLatitude) / 2}

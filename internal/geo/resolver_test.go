@@ -149,3 +149,55 @@ func TestResolveViewportExcludesPolygonHole(t *testing.T) {
 		t.Fatalf("outer area was not found: %+v, %v", intersects, err)
 	}
 }
+
+func TestUruguayHierarchyAndColombiaRemainAvailable(t *testing.T) {
+	resolver, err := NewFromFiles([]string{
+		"../../data/geo/colombia_municipalities.geojson",
+		"../../data/geo/uruguay_departments.geojson",
+		"../../data/geo/uruguay_municipalities.geojson",
+		"../../data/geo/uruguay_localities.geojson",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := resolver.(BoundaryMetadata)
+	counts := metadata.BoundaryCounts()
+	if counts["CO:MUNICIPALITY"] != 1121 || counts["UY:DEPARTMENT"] != 19 || counts["UY:MUNICIPALITY"] != 136 || counts["UY:LOCALITY"] != 652 {
+		t.Fatalf("unexpected boundary counts: %#v", counts)
+	}
+	for _, test := range []struct {
+		name, department, locality string
+		municipality               string
+		point                      Point
+	}{
+		{name: "Montevideo", point: Point{Longitude: -56.1645, Latitude: -34.9011}, department: "MONTEVIDEO", locality: "MONTEVIDEO"},
+		{name: "Maldonado", point: Point{Longitude: -54.95, Latitude: -34.9}, department: "MALDONADO", locality: "MALDONADO"},
+		{name: "Punta del Este", point: Point{Longitude: -54.9329, Latitude: -34.9508}, department: "MALDONADO", locality: "PUNTA DEL ESTE"},
+		{name: "Piriapolis", point: Point{Longitude: -55.274, Latitude: -34.862}, department: "MALDONADO", locality: "PIRIAPOLIS"},
+		{name: "Colonia del Sacramento", point: Point{Longitude: -57.84, Latitude: -34.47}, department: "COLONIA", locality: "COLONIA DEL SACRAMENTO"},
+		{name: "Ciudad de la Costa", point: Point{Longitude: -55.96, Latitude: -34.82}, department: "CANELONES", locality: "SOLYMAR"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, resolveErr := resolver.Resolve(context.Background(), test.point)
+			if resolveErr != nil || result.CountryCode != "UY" || result.Department != test.department || result.Locality != test.locality {
+				t.Fatalf("unexpected result: %+v, %v", result, resolveErr)
+			}
+			if result.DepartmentID == "" || result.LocalityID == "" {
+				t.Fatalf("missing hierarchy identifiers: %+v", result)
+			}
+		})
+	}
+	colombia, err := resolver.Resolve(context.Background(), Point{Longitude: -74.07, Latitude: 4.71})
+	if err != nil || colombia.CountryCode != "CO" || colombia.Municipality != "BOGOTÁ, D.C." {
+		t.Fatalf("Colombia resolution changed: %+v, %v", colombia, err)
+	}
+	viewport, err := resolver.(ViewportResolver).ResolveViewport(context.Background(), BBox{MinLongitude: -56.3, MaxLongitude: -55.8, MinLatitude: -35.1, MaxLatitude: -34.7})
+	if err != nil || len(viewport.Areas) == 0 {
+		t.Fatalf("expected Uruguay viewport areas: %+v, %v", viewport, err)
+	}
+	for _, area := range viewport.Areas {
+		if area.CountryCode != "UY" || area.ID == "" {
+			t.Fatalf("unexpected Uruguay area identity: %+v", area)
+		}
+	}
+}

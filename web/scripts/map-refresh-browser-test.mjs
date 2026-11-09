@@ -62,6 +62,11 @@ const backend = createServer((request, response) => {
     request.on('end', () => {
       const payload = JSON.parse(body)
       viewportRefreshRequests.push(payload)
+      if (payload.country_code === 'UY') {
+        response.statusCode = 202
+        response.end(JSON.stringify({ queries: [], skipped: [{ area: { country_code: 'UY' }, reason: 'no_permitted_source' }] }))
+        return
+      }
       if (lastViewport) {
         importedListing.longitude = lastViewport.longitude
         importedListing.latitude = lastViewport.latitude
@@ -196,7 +201,15 @@ try {
   if (allPayload.country_code !== 'CO' || allPayload.operation !== '' || allPayload.property_type !== '' || allPayload.max_queries !== 3) {
     throw new Error(`unexpected ALL refresh payload: ${JSON.stringify(allPayload)}`)
   }
-  console.log(JSON.stringify({ browser: 'firefox', viewportRefreshPosts: viewportRefreshRequests.length, plannedSourceQueries: plannedSourceQueries.length, statusPolls: statusRequests, payload, allPayload }))
+  const uruguayResult = await webdriver('POST', `/session/${session}/execute/async`, { script: `
+    const done = arguments[arguments.length - 1];
+    fetch('/api/v1/source-refresh/viewport', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ country_code: 'UY', operation: '', property_type: '', max_queries: 3, bbox: { min_longitude: -56.3, max_longitude: -55.8, min_latitude: -35.1, max_latitude: -34.7 } }) })
+      .then((response) => response.json().then((body) => ({ status: response.status, body }))).then(done);
+  `, args: [] })
+  const uruguayPayload = viewportRefreshRequests[viewportRefreshRequests.length - 1]
+  if (uruguayPayload.country_code !== 'UY' || uruguayResult.status !== 202 || uruguayResult.body.queries.length !== 0) throw new Error(`unexpected Uruguay refresh result: ${JSON.stringify({ uruguayPayload, uruguayResult })}`)
+  if (plannedSourceQueries.some((query) => query.payload === uruguayPayload)) throw new Error('disabled Uruguay source produced a planned query')
+  console.log(JSON.stringify({ browser: 'firefox', viewportRefreshPosts: viewportRefreshRequests.length, plannedSourceQueries: plannedSourceQueries.length, statusPolls: statusRequests, payload, allPayload, uruguayPayload }))
 } finally {
   if (session) await webdriver('DELETE', `/session/${session}`)
   geckodriver?.kill('SIGTERM')

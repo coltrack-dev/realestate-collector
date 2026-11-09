@@ -36,7 +36,11 @@ func (b BBox) Valid() bool {
 type Result struct {
 	CountryCode      string     `json:"country_code"`
 	Department       string     `json:"department,omitempty"`
+	DepartmentID     string     `json:"department_id,omitempty"`
 	Municipality     string     `json:"municipality,omitempty"`
+	MunicipalityID   string     `json:"municipality_id,omitempty"`
+	Locality         string     `json:"locality,omitempty"`
+	LocalityID       string     `json:"locality_id,omitempty"`
 	DIVIPOLA         string     `json:"divipola,omitempty"`
 	Resolution       Resolution `json:"resolution"`
 	AvailableSources []string   `json:"available_sources,omitempty"`
@@ -52,8 +56,24 @@ type ViewportMunicipality struct {
 	AvailableSources []string `json:"available_sources,omitempty"`
 }
 
+type ViewportArea struct {
+	Level            string   `json:"level"`
+	ID               string   `json:"id,omitempty"`
+	CountryCode      string   `json:"country_code"`
+	Department       string   `json:"department,omitempty"`
+	DepartmentID     string   `json:"department_id,omitempty"`
+	Municipality     string   `json:"municipality,omitempty"`
+	MunicipalityID   string   `json:"municipality_id,omitempty"`
+	Locality         string   `json:"locality,omitempty"`
+	LocalityID       string   `json:"locality_id,omitempty"`
+	OverlapAreaM2    float64  `json:"overlap_area_m2"`
+	OverlapRatio     float64  `json:"overlap_ratio"`
+	AvailableSources []string `json:"available_sources,omitempty"`
+}
+
 type ViewportResult struct {
 	Municipalities []ViewportMunicipality `json:"municipalities"`
+	Areas          []ViewportArea         `json:"areas"`
 }
 
 type Resolver interface {
@@ -68,6 +88,7 @@ type BoundaryMetadata interface {
 	BoundaryCount() int
 	BoundarySource() string
 	BoundaryVersion() string
+	BoundaryCounts() map[string]int
 }
 
 type polygonResolver struct {
@@ -77,24 +98,36 @@ type polygonResolver struct {
 }
 
 type boundary struct {
-	countryCode  string
-	department   string
-	municipality string
-	divipola     string
-	polygons     [][]ring
-	minLongitude float64
-	maxLongitude float64
-	minLatitude  float64
-	maxLatitude  float64
+	countryCode    string
+	level          string
+	id             string
+	department     string
+	departmentID   string
+	municipality   string
+	municipalityID string
+	locality       string
+	localityID     string
+	divipola       string
+	polygons       [][]ring
+	minLongitude   float64
+	maxLongitude   float64
+	minLatitude    float64
+	maxLatitude    float64
 }
 
 type geoJSON struct {
 	Features []struct {
 		Properties struct {
-			CountryCode  string `json:"country_code"`
-			Department   string `json:"department"`
-			Municipality string `json:"municipality"`
-			DIVIPOLA     string `json:"divipola"`
+			CountryCode    string `json:"country_code"`
+			Level          string `json:"level"`
+			ID             string `json:"id"`
+			Department     string `json:"department"`
+			DepartmentID   string `json:"department_id"`
+			Municipality   string `json:"municipality"`
+			MunicipalityID string `json:"municipality_id"`
+			Locality       string `json:"locality"`
+			LocalityID     string `json:"locality_id"`
+			DIVIPOLA       string `json:"divipola"`
 		} `json:"properties"`
 		Geometry struct {
 			Type        string          `json:"type"`
@@ -107,6 +140,44 @@ type geoJSON struct {
 type ring = []Point
 
 func NewFromFile(path string) (Resolver, error) {
+	return NewFromFiles([]string{path})
+}
+
+func NewFromFiles(paths []string) (Resolver, error) {
+	filtered := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if strings.TrimSpace(path) != "" {
+			filtered = append(filtered, path)
+		}
+	}
+	if len(filtered) == 0 {
+		return EmptyResolver{}, nil
+	}
+	combined := &polygonResolver{source: strings.Join(filtered, ",")}
+	for _, path := range filtered {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("open geographic boundaries: %w", err)
+		}
+		resolver, parseErr := newFromReader(file)
+		closeErr := file.Close()
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		combined.boundaries = append(combined.boundaries, resolver.boundaries...)
+		if combined.version == "" {
+			combined.version = resolver.version
+		} else if resolver.version != "" {
+			combined.version += "," + resolver.version
+		}
+	}
+	return combined, nil
+}
+
+func newSingleFileResolver(path string) (Resolver, error) {
 	if strings.TrimSpace(path) == "" {
 		return EmptyResolver{}, nil
 	}
@@ -138,13 +209,49 @@ func newFromReader(reader io.Reader) (*polygonResolver, error) {
 		if err != nil {
 			return nil, fmt.Errorf("feature %d: %w", index, err)
 		}
-		if feature.Properties.CountryCode == "" || feature.Properties.Municipality == "" || len(geometry) == 0 {
+		level := strings.ToUpper(strings.TrimSpace(feature.Properties.Level))
+		if level == "" {
+			level = "MUNICIPALITY"
+		}
+		if feature.Properties.CountryCode == "" || len(geometry) == 0 {
 			continue
+		}
+		if level == "DEPARTMENT" && feature.Properties.Department == "" {
+			continue
+		}
+		if level == "MUNICIPALITY" && feature.Properties.Municipality == "" {
+			continue
+		}
+		if level == "LOCALITY" && feature.Properties.Locality == "" {
+			continue
+		}
+		id := feature.Properties.ID
+		if id == "" {
+			id = feature.Properties.DIVIPOLA
+			if id == "" {
+				id = feature.Properties.DepartmentID
+			}
+			if id == "" {
+				id = feature.Properties.MunicipalityID
+			}
+			if id == "" {
+				id = feature.Properties.LocalityID
+			}
+		}
+		if id == "" {
+			switch level {
+			case "DEPARTMENT":
+				id = feature.Properties.Department
+			case "LOCALITY":
+				id = feature.Properties.Locality
+			default:
+				id = feature.Properties.Municipality
+			}
 		}
 		minLongitude, maxLongitude, minLatitude, maxLatitude := geometryBounds(geometry)
 		resolver.boundaries = append(resolver.boundaries, boundary{
 			countryCode: strings.ToUpper(strings.TrimSpace(feature.Properties.CountryCode)),
-			department:  feature.Properties.Department, municipality: feature.Properties.Municipality, divipola: feature.Properties.DIVIPOLA,
+			level:       level, id: id, department: feature.Properties.Department, departmentID: feature.Properties.DepartmentID, municipality: feature.Properties.Municipality, municipalityID: feature.Properties.MunicipalityID, locality: feature.Properties.Locality, localityID: feature.Properties.LocalityID, divipola: feature.Properties.DIVIPOLA,
 			polygons:     geometry,
 			minLongitude: minLongitude, maxLongitude: maxLongitude, minLatitude: minLatitude, maxLatitude: maxLatitude,
 		})
@@ -156,6 +263,13 @@ func newFromReader(reader io.Reader) (*polygonResolver, error) {
 func (r polygonResolver) BoundaryCount() int      { return len(r.boundaries) }
 func (r polygonResolver) BoundarySource() string  { return r.source }
 func (r polygonResolver) BoundaryVersion() string { return r.version }
+func (r polygonResolver) BoundaryCounts() map[string]int {
+	counts := make(map[string]int)
+	for _, boundary := range r.boundaries {
+		counts[boundary.countryCode+":"+boundary.level]++
+	}
+	return counts
+}
 
 func geometryBounds(polygons [][]ring) (minLongitude, maxLongitude, minLatitude, maxLatitude float64) {
 	minLongitude, minLatitude = math.Inf(1), math.Inf(1)
@@ -185,17 +299,62 @@ func (r polygonResolver) Resolve(ctx context.Context, point Point) (Result, erro
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	matches := make([]boundary, 0)
 	for _, boundary := range r.boundaries {
 		if point.Longitude < boundary.minLongitude || point.Longitude > boundary.maxLongitude || point.Latitude < boundary.minLatitude || point.Latitude > boundary.maxLatitude {
 			continue
 		}
 		for _, polygon := range boundary.polygons {
 			if pointInPolygon(point, polygon) {
-				return Result{CountryCode: boundary.countryCode, Department: boundary.department, Municipality: boundary.municipality, DIVIPOLA: boundary.divipola, Resolution: AdministrativePolygon}, nil
+				matches = append(matches, boundary)
+				break
 			}
 		}
 	}
-	return Result{Resolution: Unknown}, nil
+	if len(matches) == 0 {
+		return Result{Resolution: Unknown}, nil
+	}
+	best := matches[0]
+	for _, candidate := range matches[1:] {
+		if levelRank(candidate.level) > levelRank(best.level) {
+			best = candidate
+		}
+	}
+	result := Result{CountryCode: best.countryCode, Department: best.department, DepartmentID: best.departmentID, Municipality: best.municipality, MunicipalityID: best.municipalityID, Locality: best.locality, LocalityID: best.localityID, DIVIPOLA: best.divipola, Resolution: AdministrativePolygon}
+	for _, candidate := range matches {
+		if result.Department == "" {
+			result.Department = candidate.department
+		}
+		if result.DepartmentID == "" {
+			result.DepartmentID = candidate.departmentID
+		}
+		if result.Municipality == "" {
+			result.Municipality = candidate.municipality
+		}
+		if result.MunicipalityID == "" {
+			result.MunicipalityID = candidate.municipalityID
+		}
+		if result.Locality == "" {
+			result.Locality = candidate.locality
+		}
+		if result.LocalityID == "" {
+			result.LocalityID = candidate.localityID
+		}
+	}
+	return result, nil
+}
+
+func levelRank(level string) int {
+	switch strings.ToUpper(level) {
+	case "LOCALITY":
+		return 3
+	case "MUNICIPALITY":
+		return 2
+	case "DEPARTMENT":
+		return 1
+	default:
+		return 2
+	}
 }
 
 func (r polygonResolver) ResolveViewport(ctx context.Context, box BBox) (ViewportResult, error) {
@@ -206,14 +365,14 @@ func (r polygonResolver) ResolveViewport(ctx context.Context, box BBox) (Viewpor
 		return ViewportResult{}, fmt.Errorf("viewport bbox is invalid")
 	}
 	latitude := (box.MinLatitude + box.MaxLatitude) / 2
-	result := ViewportResult{Municipalities: make([]ViewportMunicipality, 0)}
+	result := ViewportResult{Municipalities: make([]ViewportMunicipality, 0), Areas: make([]ViewportArea, 0)}
 	indices := make(map[string]int)
 	totals := make([]float64, 0)
 	for _, boundary := range r.boundaries {
 		if box.MaxLongitude < boundary.minLongitude || box.MinLongitude > boundary.maxLongitude || box.MaxLatitude < boundary.minLatitude || box.MinLatitude > boundary.maxLatitude {
 			continue
 		}
-		key := boundary.countryCode + "\x00" + boundary.municipality + "\x00" + boundary.divipola
+		key := boundary.countryCode + "\x00" + boundary.level + "\x00" + boundary.id
 		total, overlap := 0.0, 0.0
 		for _, polygon := range boundary.polygons {
 			total += polygonAreaM2(polygon, latitude)
@@ -223,20 +382,24 @@ func (r polygonResolver) ResolveViewport(ctx context.Context, box BBox) (Viewpor
 			continue
 		}
 		if index, exists := indices[key]; exists {
-			result.Municipalities[index].OverlapAreaM2 += overlap
+			result.Areas[index].OverlapAreaM2 += overlap
 			totals[index] += total
 			continue
 		}
-		indices[key] = len(result.Municipalities)
+		indices[key] = len(result.Areas)
 		totals = append(totals, total)
-		result.Municipalities = append(result.Municipalities, ViewportMunicipality{CountryCode: boundary.countryCode, Department: boundary.department, Municipality: boundary.municipality, DIVIPOLA: boundary.divipola, OverlapAreaM2: overlap})
+		result.Areas = append(result.Areas, ViewportArea{Level: boundary.level, ID: boundary.id, CountryCode: boundary.countryCode, Department: boundary.department, DepartmentID: boundary.departmentID, Municipality: boundary.municipality, MunicipalityID: boundary.municipalityID, Locality: boundary.locality, LocalityID: boundary.localityID, OverlapAreaM2: overlap})
 	}
-	for index := range result.Municipalities {
+	for index := range result.Areas {
 		if totals[index] > 0 {
-			result.Municipalities[index].OverlapRatio = result.Municipalities[index].OverlapAreaM2 / totals[index]
+			result.Areas[index].OverlapRatio = result.Areas[index].OverlapAreaM2 / totals[index]
 		}
-		if result.Municipalities[index].OverlapRatio > 1 {
-			result.Municipalities[index].OverlapRatio = 1
+		if result.Areas[index].OverlapRatio > 1 {
+			result.Areas[index].OverlapRatio = 1
+		}
+		if result.Areas[index].Level == "MUNICIPALITY" {
+			area := result.Areas[index]
+			result.Municipalities = append(result.Municipalities, ViewportMunicipality{CountryCode: area.CountryCode, Department: area.Department, Municipality: area.Municipality, DIVIPOLA: area.ID, OverlapAreaM2: area.OverlapAreaM2, OverlapRatio: area.OverlapRatio})
 		}
 	}
 	return result, nil
