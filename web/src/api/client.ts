@@ -1,4 +1,4 @@
-import type { ListingFilters, ListingsResponse, Snapshot, Stats, Listing } from '../types'
+import type { ListingFilters, ListingsResponse, Snapshot, PriceHistoryEvent, Stats, Listing } from '../types'
 
 export interface SourceRefreshRequest {
   country_code: string
@@ -81,6 +81,11 @@ export function refreshListingDetails(id: number, signal?: AbortSignal): Promise
 
 export async function fetchHistory(id: number): Promise<Snapshot[]> {
   const response = await request<{ data: Snapshot[] }>(`/listings/${id}/history`)
+  return response.data
+}
+
+export async function fetchPriceHistory(id: number): Promise<PriceHistoryEvent[]> {
+  const response = await request<{ data: PriceHistoryEvent[] }>(`/listings/${id}/price-history`)
   return response.data
 }
 

@@ -44,6 +44,17 @@ type Snapshot struct {
 	CollectedAt time.Time `json:"collected_at"`
 }
 
+type PriceHistoryEvent struct {
+	ID         int64     `json:"id"`
+	Price      int64     `json:"price"`
+	Currency   string    `json:"currency"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
+type PriceHistoryReader interface {
+	PriceHistory(context.Context, int64) ([]PriceHistoryEvent, error)
+}
+
 type ListingRecord struct {
 	ID          int64
 	Listing     model.Listing
@@ -490,6 +501,27 @@ func (s *Server) listingByID(writer http.ResponseWriter, request *http.Request) 
 		history, err := s.Repository.History(ctx, id)
 		if err != nil {
 			writeError(writer, http.StatusInternalServerError, "failed to load listing history")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"data": history})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "price-history" {
+		reader, ok := s.Repository.(PriceHistoryReader)
+		if !ok {
+			writeError(writer, http.StatusNotImplemented, "price history is not configured")
+			return
+		}
+		if _, err := s.Repository.Get(ctx, id); errors.Is(err, ErrNotFound) {
+			writeError(writer, http.StatusNotFound, "listing not found")
+			return
+		} else if err != nil {
+			writeError(writer, http.StatusInternalServerError, "failed to load listing")
+			return
+		}
+		history, err := reader.PriceHistory(ctx, id)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "failed to load price history")
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"data": history})

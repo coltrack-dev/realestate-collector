@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/example/realestate-collector/internal/model"
@@ -237,8 +238,12 @@ func (s *Store) Save(ctx context.Context, l model.Listing) (created, updated boo
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	now = now.UTC()
 	listingID, created, detailsReady, err := upsertListing(ctx, tx, sourceID, l, now)
 	if err != nil {
+		return false, false, err
+	}
+	if _, err = recordPriceHistory(ctx, tx, listingID, l, now); err != nil {
 		return false, false, err
 	}
 	updated, err = insertSnapshot(ctx, tx, listingID, l, now)
@@ -401,6 +406,53 @@ func insertSnapshot(ctx context.Context, tx databaseTransaction, listingID int64
 		return false, fmt.Errorf("insert snapshot for listing %s: %w", listing.ExternalID, err)
 	}
 	return snapshotID != 0, nil
+}
+
+func shouldRecordPriceHistory(previousPrice *int64, previousCurrency string, listing model.Listing) bool {
+	if listing.Price == nil || strings.TrimSpace(listing.Currency) == "" {
+		return false
+	}
+	if previousPrice == nil {
+		return true
+	}
+	return *previousPrice != *listing.Price || !strings.EqualFold(previousCurrency, strings.TrimSpace(listing.Currency))
+}
+
+func recordPriceHistory(ctx context.Context, tx databaseTransaction, listingID int64, listing model.Listing, observedAt time.Time) (bool, error) {
+	if !shouldRecordPriceHistory(nil, "", listing) {
+		return false, nil
+	}
+	currency := strings.ToUpper(strings.TrimSpace(listing.Currency))
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, listingID); err != nil {
+		return false, fmt.Errorf("lock price history for listing %d: %w", listingID, err)
+	}
+	var previousPrice int64
+	var previousCurrency string
+	err := tx.QueryRow(ctx, `
+SELECT price, currency
+FROM listing_price_history
+WHERE listing_id = $1
+ORDER BY observed_at DESC, id DESC
+LIMIT 1`, listingID).Scan(&previousPrice, &previousCurrency)
+	if err == nil && previousPrice == *listing.Price && strings.EqualFold(previousCurrency, currency) {
+		return false, nil
+	}
+	if err != nil && err != pgx.ErrNoRows {
+		return false, fmt.Errorf("read price history for listing %d: %w", listingID, err)
+	}
+	var eventID int64
+	err = tx.QueryRow(ctx, `
+INSERT INTO listing_price_history(listing_id, price, currency, observed_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (listing_id, price, currency, observed_at) DO NOTHING
+RETURNING id`, listingID, *listing.Price, currency, observedAt.UTC()).Scan(&eventID)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("record price history for listing %d: %w", listingID, err)
+	}
+	return eventID != 0, nil
 }
 
 func syncListingImages(ctx context.Context, tx databaseTransaction, listingID int64, urls []string) error {

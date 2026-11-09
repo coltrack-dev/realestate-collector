@@ -45,6 +45,13 @@ export interface Snapshot {
   collected_at: string
 }
 
+export interface PriceHistoryEvent {
+  id: number
+  price: number
+  currency: string
+  observed_at: string
+}
+
 export interface ListingsResponse {
   data: Listing[]
   complete: boolean

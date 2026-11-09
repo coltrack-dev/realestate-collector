@@ -127,6 +127,30 @@ ORDER BY collected_at DESC, id DESC`, listingID)
 	return result, nil
 }
 
+func (r *ReadRepository) PriceHistory(ctx context.Context, listingID int64) ([]api.PriceHistoryEvent, error) {
+	rows, err := r.store.Pool.Query(ctx, `
+SELECT id, price, currency, observed_at
+FROM listing_price_history
+WHERE listing_id = $1
+ORDER BY observed_at ASC, id ASC`, listingID)
+	if err != nil {
+		return nil, fmt.Errorf("list price history for %d: %w", listingID, err)
+	}
+	defer rows.Close()
+	result := make([]api.PriceHistoryEvent, 0)
+	for rows.Next() {
+		var event api.PriceHistoryEvent
+		if err := rows.Scan(&event.ID, &event.Price, &event.Currency, &event.ObservedAt); err != nil {
+			return nil, fmt.Errorf("scan price history: %w", err)
+		}
+		result = append(result, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate price history: %w", err)
+	}
+	return result, nil
+}
+
 func (r *ReadRepository) Stats(ctx context.Context) (api.Stats, error) {
 	var stats api.Stats
 	if err := r.store.Pool.QueryRow(ctx, `SELECT count(*) FROM listings`).Scan(&stats.Total); err != nil {

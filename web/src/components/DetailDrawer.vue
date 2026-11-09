@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { fetchHistory, refreshListingDetails, resolveImageUrl } from '../api/client'
-import type { Listing, Snapshot } from '../types'
+import { fetchHistory, fetchPriceHistory, refreshListingDetails, resolveImageUrl } from '../api/client'
+import type { Listing, PriceHistoryEvent, Snapshot } from '../types'
 import { getLocationPrecision } from '../map/coordinates'
 
 const props = defineProps<{ listing: Listing | null; open: boolean }>()
 const emit = defineEmits<{ close: []; toggle: [] }>()
 const history = ref<Snapshot[]>([])
+const priceHistory = ref<PriceHistoryEvent[]>([])
+const priceHistoryError = ref('')
 const loading = ref(false)
 const error = ref('')
 const detailsLoading = ref(false)
@@ -19,6 +21,7 @@ const modalRoot = ref<HTMLElement | null>(null)
 const toggleButton = ref<HTMLButtonElement | null>(null)
 let detailsController: AbortController | null = null
 let detailsRequestSequence = 0
+let priceHistoryRequestSequence = 0
 let previousFocusedElement: HTMLElement | null = null
 const detailsCache = new Map<number, Listing>()
 
@@ -58,6 +61,19 @@ async function loadHistory() {
   try { history.value = await fetchHistory(props.listing.id) } catch (caught) { error.value = caught instanceof Error ? caught.message : 'No se pudo cargar el historial' } finally { loading.value = false }
 }
 
+async function loadPriceHistory() {
+  if (!props.listing) return
+  const listingID = props.listing.id
+  const requestSequence = ++priceHistoryRequestSequence
+  priceHistoryError.value = ''
+  try {
+    const result = await fetchPriceHistory(listingID)
+    if (requestSequence === priceHistoryRequestSequence && props.listing?.id === listingID) priceHistory.value = result
+  } catch (caught) {
+    if (requestSequence === priceHistoryRequestSequence && props.listing?.id === listingID) priceHistoryError.value = caught instanceof Error ? caught.message : 'No se pudo cargar el historial de precios'
+  }
+}
+
 async function loadDetails() {
   const listing = props.listing
   if (!listing) return
@@ -89,10 +105,19 @@ function resetForListing() {
   detailsRequestSequence++
   details.value = props.listing
   detailsError.value = ''
+  priceHistory.value = []
+  priceHistoryError.value = ''
   imageFailed.value = false
   selectedImage.value = 0
   void loadDetails()
   void loadHistory()
+  void loadPriceHistory()
+}
+
+function priceBarWidth(item: PriceHistoryEvent): string {
+  const values = priceHistory.value.filter((event) => event.currency === item.currency).map((event) => event.price)
+  const maximum = Math.max(...values, item.price)
+  return `${Math.max(8, Math.round((item.price / maximum) * 100))}%`
 }
 
 function selectImage(index: number) {
@@ -217,7 +242,8 @@ onBeforeUnmount(() => { detailsController?.abort(); document.removeEventListener
         <div v-if="detailsLoading" class="inline-state">Actualizando detalles…</div>
         <div v-else-if="detailsError" class="inline-state error-text">{{ detailsError }} <button type="button" class="text-button" @click="loadDetails">Reintentar</button></div>
         <div class="observation-row"><span>Primer registro <strong>{{ date(current.first_seen_at) }}</strong></span><span>Último registro <strong>{{ date(current.last_seen_at) }}</strong></span></div>
-        <section class="history-section"><div class="section-title"><span>Historial de precio</span><span class="history-count">{{ history.length }}</span></div><div v-if="loading" class="inline-state">Cargando historial…</div><div v-else-if="error" class="inline-state error-text">{{ error }}</div><div v-else-if="!history.length" class="inline-state">Sin cambios registrados.</div><div v-else class="history-list"><div v-for="item in history" :key="item.id" class="history-item"><span>{{ date(item.collected_at) }}</span><strong>{{ money(item.price, item.currency) }}</strong></div></div></section>
+        <section class="history-section"><div class="section-title"><span>Historial de precios</span><span class="history-count">{{ priceHistory.length }}</span></div><div v-if="priceHistoryError" class="inline-state error-text">{{ priceHistoryError }}</div><div v-else-if="!priceHistory.length" class="inline-state">Sin cambios registrados.</div><div v-else class="price-history-list"><div v-for="item in priceHistory" :key="item.id" class="price-history-item"><div class="price-history-meta"><span>{{ date(item.observed_at) }}</span><strong>{{ money(item.price, item.currency) }}</strong></div><div class="price-history-bar" aria-hidden="true"><span :style="{ width: priceBarWidth(item) }"></span></div></div></div></section>
+        <section class="history-section"><div class="section-title"><span>Historial de snapshots</span><span class="history-count">{{ history.length }}</span></div><div v-if="loading" class="inline-state">Cargando historial…</div><div v-else-if="error" class="inline-state error-text">{{ error }}</div><div v-else-if="!history.length" class="inline-state">Sin cambios registrados.</div><div v-else class="history-list"><div v-for="item in history" :key="item.id" class="history-item"><span>{{ date(item.collected_at) }}</span><strong>{{ money(item.price, item.currency) }}</strong></div></div></section>
         <a class="original-link" :href="current.url" target="_blank" rel="noreferrer">Ver publicación original <span>↗</span></a>
       </div>
       </template>
