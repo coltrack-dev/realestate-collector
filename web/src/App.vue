@@ -15,6 +15,7 @@ const viewportListings = ref<Listing[]>([])
 const stats = ref<Stats | null>(null)
 const selectedListingId = ref<number | null>(null)
 const selectedListingSnapshot = ref<Listing | null>(null)
+const isDetailDrawerOpen = ref(false)
 const filters = ref<ListingFilters>({ source: '', country_code: '', city: '', operation: '', property_type: '', min_price: '', max_price: '', min_area: '', max_area: '', min_longitude: '', max_longitude: '', min_latitude: '', max_latitude: '', limit: 50, offset: 0 })
 const loading = ref(true)
 const error = ref('')
@@ -90,6 +91,7 @@ function resetFilters() { const next = { ...filters.value, source: '', country_c
 async function selectListing(listing: Listing, source: 'marker-click' | 'listing-click') {
   selectedListingId.value = listing.id
   selectedListingSnapshot.value = listing
+  isDetailDrawerOpen.value = true
   if (source !== 'marker-click') return
   await nextTick()
   const container = activeTab.value === 'map' ? mapListingScroll.value : listingScroll.value
@@ -100,7 +102,8 @@ async function selectListing(listing: Listing, source: 'marker-click' | 'listing
 }
 function selectListingFromCard(listing: Listing) { void selectListing(listing, 'listing-click') }
 function selectListingFromMarker(listing: Listing) { void selectListing(listing, 'marker-click') }
-function closeDetail() { selectedListingId.value = null }
+function toggleDetail() { isDetailDrawerOpen.value = !isDetailDrawerOpen.value }
+function closeDetail() { isDetailDrawerOpen.value = false }
 function movePage(direction: number) { void loadListings({ ...filters.value, offset: Math.max(0, filters.value.offset + direction * filters.value.limit) }) }
 function selectTab(tab: 'properties' | 'map' | 'stats') {
   activeTab.value = tab
@@ -388,6 +391,6 @@ onBeforeUnmount(() => {
         </div>
       </aside>
     </main>
-    <DetailDrawer :listing="selected" @close="closeDetail" />
+    <DetailDrawer :listing="selected" :open="isDetailDrawerOpen" @toggle="toggleDetail" @close="closeDetail" />
   </div>
 </template>

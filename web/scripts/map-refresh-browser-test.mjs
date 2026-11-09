@@ -14,12 +14,13 @@ const listing = {
   price: 350000000, currency: 'COP', area_m2: 70, bedrooms: 2, bathrooms: 2, parking_spots: null,
   country: 'Colombia', country_code: 'CO', department: 'Cundinamarca', city: 'Bogotá D.C.', neighborhood: 'Chapinero',
   address: null, latitude: 4.711, longitude: -74.0721, resolved_latitude: null, resolved_longitude: null,
-  location_precision: 'EXACT', geocode_provider: null, geocoded_at: null, images: [], published_at: null,
+  location_precision: 'EXACT', geocode_provider: null, geocoded_at: null, images: ['data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="320" height="200"%3E%3Crect width="320" height="200" fill="%232f6d59"/%3E%3C/svg%3E'], published_at: null,
   collected_at: new Date().toISOString(), first_seen_at: new Date().toISOString(), last_seen_at: new Date().toISOString(),
   details_fetched_at: null, details_expires_at: null, details_status: 'NOT_LOADED',
 }
 const importedListing = { ...listing, id: 202, external_id: 'MOCK-202', title: 'Apartamento incorporado por refresh' }
-const inventory = [listing]
+const secondListing = { ...listing, id: 102, external_id: 'MOCK-102', title: 'Segundo apartamento de prueba', longitude: -74.073, latitude: 4.712 }
+const inventory = [listing, secondListing]
 let lastViewport = null
 
 const backend = createServer((request, response) => {
@@ -169,7 +170,66 @@ try {
     return ready === true
   })
   console.log('map zoom control ready')
-  for (let index = 0; index < 45; index += 1) await clickSelector('.maplibregl-ctrl-zoom-in')
+  await new Promise((resolve) => setTimeout(resolve, 5000))
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `window.__listingMapForTests.setZoom(15); return true`, args: [] })
+  // Allow moveend debounce and the mock refresh/list update to settle before
+  // taking the baseline camera snapshot.
+  await new Promise((resolve) => setTimeout(resolve, 5000))
+  await waitFor(async () => {
+    const marker = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.map-marker') !== null`, args: [] })
+    return marker === true
+  })
+  const cameraBeforeSelection = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return JSON.parse(document.querySelector('.map-canvas').dataset.cameraState)`, args: [] })
+  if (Math.abs(cameraBeforeSelection.zoom - 15) > 1.1) throw new Error(`test camera did not reach zoom 15: ${JSON.stringify(cameraBeforeSelection)}`)
+  const refreshesBeforeSelection = viewportRefreshRequests.length
+  await clickSelector('.map-marker')
+  await new Promise((resolve) => setTimeout(resolve, 800))
+  const cameraAfterSelection = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return JSON.parse(document.querySelector('.map-canvas').dataset.cameraState)`, args: [] })
+  for (const field of ['zoom', 'bearing', 'pitch']) {
+    if (Math.abs(cameraAfterSelection[field] - cameraBeforeSelection[field]) > 0.0001) throw new Error(`camera ${field} changed after marker selection: ${JSON.stringify({ cameraBeforeSelection, cameraAfterSelection })}`)
+  }
+  if (cameraAfterSelection.center.some((value, index) => Math.abs(value - cameraBeforeSelection.center[index]) > 0.0001)) {
+    throw new Error(`camera center changed after marker selection: ${JSON.stringify({ cameraBeforeSelection, cameraAfterSelection })}`)
+  }
+  if (viewportRefreshRequests.length !== refreshesBeforeSelection) throw new Error('marker selection triggered a source refresh')
+  await waitFor(async () => {
+    const markerCount = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelectorAll('.map-marker').length`, args: [] })
+    return markerCount >= 2
+  })
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `document.querySelectorAll('.map-marker')[1].click(); return true`, args: [] })
+  await new Promise((resolve) => setTimeout(resolve, 800))
+  const cameraAfterSecondSelection = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return JSON.parse(document.querySelector('.map-canvas').dataset.cameraState)`, args: [] })
+  for (const field of ['zoom', 'bearing', 'pitch']) {
+    if (Math.abs(cameraAfterSecondSelection[field] - cameraBeforeSelection[field]) > 0.0001) throw new Error(`camera ${field} changed after second marker selection: ${JSON.stringify({ cameraBeforeSelection, cameraAfterSecondSelection })}`)
+  }
+  if (cameraAfterSecondSelection.center.some((value, index) => Math.abs(value - cameraBeforeSelection.center[index]) > 0.0001)) {
+    throw new Error(`camera center changed after second marker selection: ${JSON.stringify({ cameraBeforeSelection, cameraAfterSecondSelection })}`)
+  }
+  if (viewportRefreshRequests.length !== refreshesBeforeSelection) throw new Error('second marker selection triggered a source refresh')
+  console.log('marker selection preserved camera state')
+  await clickSelector('.detail-gallery-main')
+  await waitFor(async () => await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.detail-drawer.is-expanded') !== null`, args: [] }))
+  await clickSelector('.detail-toggle-button')
+  const imageButtonCloseState = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return { open: document.querySelector('.detail-toggle-button').getAttribute('aria-expanded'), expanded: document.querySelector('.detail-drawer.is-expanded') !== null }`, args: [] })
+  if (imageButtonCloseState.open !== 'true' || imageButtonCloseState.expanded) throw new Error('image modal button closed the parent drawer')
+  await clickSelector('.detail-gallery-main')
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true`, args: [] })
+  const imageEscapeState = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return { open: document.querySelector('.detail-toggle-button').getAttribute('aria-expanded'), expanded: document.querySelector('.detail-drawer.is-expanded') !== null }`, args: [] })
+  if (imageEscapeState.open !== 'true' || imageEscapeState.expanded) throw new Error('Escape closed the parent drawer with image modal')
+  await clickSelector('.detail-gallery-main')
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `document.querySelector('.detail-modal-backdrop').dispatchEvent(new MouseEvent('click', { bubbles: true })); return true`, args: [] })
+  const imageBackdropState = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return { open: document.querySelector('.detail-toggle-button').getAttribute('aria-expanded'), expanded: document.querySelector('.detail-drawer.is-expanded') !== null }`, args: [] })
+  if (imageBackdropState.open !== 'true' || imageBackdropState.expanded) throw new Error('image modal backdrop closed the parent drawer')
+  await clickSelector('.detail-toggle-button')
+  const closedState = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.detail-toggle-button').getAttribute('aria-expanded')`, args: [] })
+  if (closedState !== 'false' || viewportRefreshRequests.length !== refreshesBeforeSelection) throw new Error('closing DetailDrawer changed refresh state')
+  await clickSelector('.detail-toggle-button')
+  const reopenedState = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.detail-toggle-button').getAttribute('aria-expanded')`, args: [] })
+  if (reopenedState !== 'true' || viewportRefreshRequests.length !== refreshesBeforeSelection) throw new Error('reopening DetailDrawer changed refresh state')
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return true`, args: [] })
+  const escapeState = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return document.querySelector('.detail-toggle-button').getAttribute('aria-expanded')`, args: [] })
+  if (escapeState !== 'false') throw new Error('Escape did not close DetailDrawer')
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `window.__listingMapForTests.setZoom(18); return true`, args: [] })
   console.log('map moved')
   await new Promise((resolve) => setTimeout(resolve, 5000))
   const diagnostics = await webdriver('POST', `/session/${session}/execute/sync`, { script: `return window.__mapRefreshDiagnostics ?? []`, args: [] })
@@ -195,7 +255,7 @@ try {
     [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Aplicar').click();
     return true;
   `, args: [] })
-  for (let index = 0; index < 3; index += 1) await clickSelector('.maplibregl-ctrl-zoom-in')
+  await webdriver('POST', `/session/${session}/execute/sync`, { script: `window.__listingMapForTests.setZoom(19); return true`, args: [] })
   await waitFor(() => viewportRefreshRequests.length > beforeAllFilters, 10000)
   const allPayload = viewportRefreshRequests[viewportRefreshRequests.length - 1]
   if (allPayload.country_code !== 'CO' || allPayload.operation !== '' || allPayload.property_type !== '' || allPayload.max_queries !== 3) {

@@ -4,8 +4,8 @@ import { fetchHistory, refreshListingDetails, resolveImageUrl } from '../api/cli
 import type { Listing, Snapshot } from '../types'
 import { getLocationPrecision } from '../map/coordinates'
 
-const props = defineProps<{ listing: Listing | null }>()
-const emit = defineEmits<{ close: [] }>()
+const props = defineProps<{ listing: Listing | null; open: boolean }>()
+const emit = defineEmits<{ close: []; toggle: [] }>()
 const history = ref<Snapshot[]>([])
 const loading = ref(false)
 const error = ref('')
@@ -13,11 +13,10 @@ const detailsLoading = ref(false)
 const detailsError = ref('')
 const imageFailed = ref(false)
 const selectedImage = ref(0)
-const expanded = ref(false)
+const isImageModalOpen = ref(false)
 const details = ref<Listing | null>(null)
 const modalRoot = ref<HTMLElement | null>(null)
-const expandButton = ref<HTMLButtonElement | null>(null)
-const closeButton = ref<HTMLButtonElement | null>(null)
+const toggleButton = ref<HTMLButtonElement | null>(null)
 let detailsController: AbortController | null = null
 let detailsRequestSequence = 0
 let previousFocusedElement: HTMLElement | null = null
@@ -90,11 +89,11 @@ function moveImage(direction: number) {
 }
 
 function openFromMainPhoto() {
-  if (!expanded.value && currentPhoto.value) void openExpanded()
+  if (props.open && !isImageModalOpen.value && currentPhoto.value) void openExpanded()
 }
 
 function handleMainPhotoKeydown(event: KeyboardEvent) {
-  if (expanded.value || !currentPhoto.value) return
+  if (isImageModalOpen.value || !currentPhoto.value) return
   if (event.target !== event.currentTarget) return
   if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault()
@@ -108,8 +107,12 @@ function focusableElements(): HTMLElement[] {
 }
 
 function handleKeydown(event: KeyboardEvent) {
-  if (!expanded.value) return
-  if (event.key === 'Escape') { event.preventDefault(); closeExpanded(); return }
+  if (event.key === 'Escape') {
+    if (isImageModalOpen.value) closeImageModal()
+    else if (props.open) emit('close')
+    return
+  }
+  if (!isImageModalOpen.value) return
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
     event.preventDefault()
     moveImage(event.key === 'ArrowLeft' ? -1 : 1)
@@ -131,24 +134,27 @@ function handleKeydown(event: KeyboardEvent) {
 
 async function openExpanded() {
   previousFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null
-  expanded.value = true
+  isImageModalOpen.value = true
   document.body.classList.add('detail-modal-open')
   await nextTick()
-  closeButton.value?.focus()
+  toggleButton.value?.focus()
 }
 
-function closeExpanded() {
-  expanded.value = false
+function closeImageModal() {
+  isImageModalOpen.value = false
   document.body.classList.remove('detail-modal-open')
   void nextTick(() => {
     if (previousFocusedElement?.isConnected) previousFocusedElement.focus()
-    else expandButton.value?.focus()
+    else toggleButton.value?.focus()
   })
 }
 
-function closeDetail() {
-  if (expanded.value) closeExpanded()
-  emit('close')
+function togglePanel() {
+  if (isImageModalOpen.value) {
+    closeImageModal()
+    return
+  }
+  emit('toggle')
 }
 
 watch(() => props.listing?.id, resetForListing)
@@ -163,18 +169,16 @@ onBeforeUnmount(() => { detailsController?.abort(); document.removeEventListener
 
 <template>
   <div v-if="current" class="detail-layer">
-    <div v-if="expanded" class="detail-modal-backdrop" aria-hidden="true" @click="closeExpanded"></div>
-    <aside ref="modalRoot" class="detail-drawer" :class="{ 'is-expanded': expanded }" :role="expanded ? 'dialog' : 'complementary'" :aria-modal="expanded ? 'true' : undefined" :aria-label="expanded ? 'Detalle de la propiedad' : undefined">
+    <div v-if="open && isImageModalOpen" class="detail-modal-backdrop" aria-hidden="true" @click="closeImageModal"></div>
+    <aside ref="modalRoot" class="detail-drawer" :class="{ 'is-expanded': isImageModalOpen, 'is-closed': !open }" :role="open && isImageModalOpen ? 'dialog' : 'complementary'" :aria-modal="open && isImageModalOpen ? 'true' : undefined" :aria-label="open && isImageModalOpen ? 'Detalle de la propiedad' : undefined">
       <header class="detail-header">
-        <span class="eyebrow">{{ current.source }} · {{ current.external_id }}</span>
-        <div class="detail-actions">
-          <button ref="expandButton" class="detail-action-button" type="button" :aria-label="expanded ? 'Reducir detalle' : 'Expandir detalle'" :title="expanded ? 'Reducir' : 'Expandir'" @click="expanded ? closeExpanded() : openExpanded()"><span aria-hidden="true">{{ expanded ? '⤡' : '⤢' }}</span></button>
-          <button ref="closeButton" class="close-button" type="button" aria-label="Cerrar detalle" @click="closeDetail">×</button>
-        </div>
+        <span v-if="open" class="eyebrow">{{ current.source }} · {{ current.external_id }}</span>
+        <button ref="toggleButton" class="detail-toggle-button" type="button" :aria-expanded="open" :aria-label="isImageModalOpen ? 'Cerrar fotografía' : open ? 'Cerrar detalles' : 'Abrir detalles'" :title="isImageModalOpen ? 'Cerrar fotografía' : open ? 'Cerrar detalles' : 'Abrir detalles'" @click.stop="togglePanel"><span aria-hidden="true">{{ open ? '×' : '⤢' }}</span></button>
       </header>
 
+      <template v-if="open">
       <section class="detail-gallery" aria-label="Galería de fotografías">
-        <div v-if="currentPhoto && !imageFailed" class="detail-gallery-main" :class="{ 'is-zoomable': !expanded }" :role="expanded ? undefined : 'button'" :tabindex="expanded ? -1 : 0" :aria-label="expanded ? undefined : 'Ampliar fotografía'" @click="openFromMainPhoto" @keydown="handleMainPhotoKeydown">
+        <div v-if="currentPhoto && !imageFailed" class="detail-gallery-main" :class="{ 'is-zoomable': !isImageModalOpen }" :role="isImageModalOpen ? undefined : 'button'" :tabindex="isImageModalOpen ? -1 : 0" :aria-label="isImageModalOpen ? undefined : 'Ampliar fotografía'" @click="openFromMainPhoto" @keydown="handleMainPhotoKeydown">
           <button v-if="photos.length > 1" class="gallery-arrow gallery-arrow-prev" type="button" aria-label="Fotografía anterior" @click.stop="moveImage(-1)">‹</button>
           <img :src="resolveImageUrl(currentPhoto)" :alt="current.title" @error="imageFailed = true" />
           <button v-if="photos.length > 1" class="gallery-arrow gallery-arrow-next" type="button" aria-label="Fotografía siguiente" @click.stop="moveImage(1)">›</button>
@@ -198,6 +202,7 @@ onBeforeUnmount(() => { detailsController?.abort(); document.removeEventListener
         <section class="history-section"><div class="section-title"><span>Historial de precio</span><span class="history-count">{{ history.length }}</span></div><div v-if="loading" class="inline-state">Cargando historial…</div><div v-else-if="error" class="inline-state error-text">{{ error }}</div><div v-else-if="!history.length" class="inline-state">Sin cambios registrados.</div><div v-else class="history-list"><div v-for="item in history" :key="item.id" class="history-item"><span>{{ date(item.collected_at) }}</span><strong>{{ money(item.price, item.currency) }}</strong></div></div></section>
         <a class="original-link" :href="current.url" target="_blank" rel="noreferrer">Ver publicación original <span>↗</span></a>
       </div>
+      </template>
     </aside>
   </div>
 </template>
