@@ -106,7 +106,7 @@ VALUES (
 ON CONFLICT(source_id, external_id) DO UPDATE SET
     url = EXCLUDED.url,
     title = EXCLUDED.title,
-    description = EXCLUDED.description,
+	description = CASE WHEN listings.details_status = 'READY' THEN listings.description WHEN NULLIF(EXCLUDED.description, '') IS NOT NULL THEN EXCLUDED.description ELSE listings.description END,
     operation = EXCLUDED.operation,
     property_type = EXCLUDED.property_type,
     price = COALESCE(EXCLUDED.price, listings.price),
@@ -158,11 +158,11 @@ ON CONFLICT(source_id, external_id) DO UPDATE SET
         COALESCE(NULLIF(EXCLUDED.address, ''), listings.address) IS DISTINCT FROM listings.address OR
         COALESCE(NULLIF(EXCLUDED.country_code, ''), listings.country_code) IS DISTINCT FROM listings.country_code
         THEN NULL ELSE listings.geocoded_at END,
-    images = EXCLUDED.images,
+	images = CASE WHEN listings.details_status = 'READY' THEN listings.images WHEN jsonb_array_length(EXCLUDED.images) > 0 THEN EXCLUDED.images ELSE listings.images END,
     published_at = EXCLUDED.published_at,
     last_seen_at = EXCLUDED.last_seen_at,
     updated_at = EXCLUDED.updated_at
-RETURNING id, (xmax = 0)`
+RETURNING id, (xmax = 0), (details_status = 'READY')`
 
 const insertSnapshotQuery = `
 INSERT INTO listing_snapshots(
@@ -237,7 +237,7 @@ func (s *Store) Save(ctx context.Context, l model.Listing) (created, updated boo
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	listingID, created, err := upsertListing(ctx, tx, sourceID, l, now)
+	listingID, created, detailsReady, err := upsertListing(ctx, tx, sourceID, l, now)
 	if err != nil {
 		return false, false, err
 	}
@@ -245,8 +245,10 @@ func (s *Store) Save(ctx context.Context, l model.Listing) (created, updated boo
 	if err != nil {
 		return false, false, err
 	}
-	if err = syncListingImages(ctx, tx, listingID, l.Images); err != nil {
-		return false, false, err
+	if !detailsReady {
+		if err = syncListingImages(ctx, tx, listingID, l.Images); err != nil {
+			return false, false, err
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return false, false, fmt.Errorf("commit listing transaction: %w", err)
@@ -359,16 +361,17 @@ func upsertSource(ctx context.Context, tx databaseTransaction, listing model.Lis
 	return sourceID, nil
 }
 
-func upsertListing(ctx context.Context, tx databaseTransaction, sourceID int64, listing model.Listing, collectedAt time.Time) (int64, bool, error) {
+func upsertListing(ctx context.Context, tx databaseTransaction, sourceID int64, listing model.Listing, collectedAt time.Time) (int64, bool, bool, error) {
 	images, err := json.Marshal(listing.Images)
 	if err != nil {
-		return 0, false, fmt.Errorf("encode images for listing %s: %w", listing.ExternalID, err)
+		return 0, false, false, fmt.Errorf("encode images for listing %s: %w", listing.ExternalID, err)
 	}
 	if listing.Images == nil {
 		images = []byte("[]")
 	}
 	var listingID int64
 	var created bool
+	var detailsReady bool
 	err = tx.QueryRow(ctx, upsertListingQuery,
 		sourceID, listing.ExternalID, listing.URL, listing.Title,
 		listing.Description, listing.Operation, listing.PropertyType,
@@ -377,11 +380,11 @@ func upsertListing(ctx context.Context, tx databaseTransaction, sourceID int64, 
 		listing.CountryCode, listing.Department, listing.City, listing.Neighborhood, listing.Address,
 		listing.Latitude, listing.Longitude, images, listing.PublishedAt,
 		collectedAt,
-	).Scan(&listingID, &created)
+	).Scan(&listingID, &created, &detailsReady)
 	if err != nil {
-		return 0, false, fmt.Errorf("upsert listing %s: %w", listing.ExternalID, err)
+		return 0, false, false, fmt.Errorf("upsert listing %s: %w", listing.ExternalID, err)
 	}
-	return listingID, created, nil
+	return listingID, created, detailsReady, nil
 }
 
 func insertSnapshot(ctx context.Context, tx databaseTransaction, listingID int64, listing model.Listing, collectedAt time.Time) (bool, error) {

@@ -16,6 +16,7 @@ import (
 	"github.com/example/realestate-collector/internal/collector"
 	"github.com/example/realestate-collector/internal/model"
 	"github.com/example/realestate-collector/internal/normalize"
+	"github.com/example/realestate-collector/internal/sources/httpclient"
 )
 
 const DefaultEndpoint = "https://inmuebles.elpais.com.uy/api/public-mcp"
@@ -82,6 +83,7 @@ func New(httpClient *http.Client, userAgent string, delay time.Duration) Source 
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
+	httpClient.Transport = httpclient.NewLoggingTransport(httpClient.Transport, nil, "gallito")
 	if delay <= 0 {
 		delay = 3 * time.Second
 	}
@@ -176,6 +178,7 @@ func (s Source) Collect(ctx context.Context, limit int) ([]model.Listing, error)
 	}
 	if s.HTTP == nil {
 		s.HTTP = &http.Client{Timeout: 30 * time.Second}
+		s.HTTP.Transport = httpclient.NewLoggingTransport(s.HTTP.Transport, nil, "gallito")
 	}
 	jobs := []SearchJob{{City: s.City, Operation: s.Operation}}
 	if len(s.PropertyTypes) > 0 {
@@ -513,7 +516,7 @@ func (s Source) call(ctx context.Context, method string, arguments any, target a
 			return fmt.Errorf("Gallito MCP %s: access denied with HTTP %d", method, response.StatusCode)
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			return fmt.Errorf("Gallito MCP %s: HTTP %d: %s", method, response.StatusCode, strings.TrimSpace(string(responseBody)))
+			return fmt.Errorf("Gallito MCP %s: HTTP %d", method, response.StatusCode)
 		}
 		var envelope rpcEnvelope
 		if err := json.Unmarshal(responseBody, &envelope); err != nil {

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +20,7 @@ type Client struct {
 	HTTP      *http.Client
 	UserAgent string
 	Delay     time.Duration
+	Source    string
 
 	mu          sync.Mutex
 	lastRequest time.Time
@@ -30,12 +33,18 @@ func New(httpClient *http.Client, userAgent string, delay time.Duration) *Client
 	return &Client{HTTP: httpClient, UserAgent: userAgent, Delay: delay}
 }
 
+func (c *Client) SetSource(source string) {
+	c.Source = source
+	c.HTTP.Transport = NewLoggingTransport(c.HTTP.Transport, slog.Default(), source)
+}
+
 func (c *Client) GetJSON(ctx context.Context, endpoint string, target any) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := c.wait(ctx); err != nil {
 			return err
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		requestContext := WithMetadata(ctx, RequestMetadata{Source: c.Source, Attempt: attempt + 1})
+		request, err := http.NewRequestWithContext(requestContext, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return fmt.Errorf("create GET request: %w", err)
 		}
@@ -52,16 +61,16 @@ func (c *Client) GetJSON(ctx context.Context, endpoint string, target any) error
 				time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
 				continue
 			}
-			return fmt.Errorf("GET %s: %w", endpoint, err)
+			return fmt.Errorf("GET %s: %w", safeEndpoint(endpoint), err)
 		}
 
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, 10<<20))
 		response.Body.Close()
 		if readErr != nil {
-			return fmt.Errorf("read %s response: %w", endpoint, readErr)
+			return fmt.Errorf("read %s response: %w", safeEndpoint(endpoint), readErr)
 		}
 		if response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusUnauthorized {
-			return fmt.Errorf("GET %s: access denied with HTTP %d; stopping", endpoint, response.StatusCode)
+			return fmt.Errorf("GET %s: access denied with HTTP %d; stopping", safeEndpoint(endpoint), response.StatusCode)
 		}
 		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
 			if attempt < 2 {
@@ -72,14 +81,25 @@ func (c *Client) GetJSON(ctx context.Context, endpoint string, target any) error
 			}
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			return fmt.Errorf("GET %s: HTTP %d: %s", endpoint, response.StatusCode, strings.TrimSpace(string(body)))
+			return fmt.Errorf("GET %s: HTTP %d", safeEndpoint(endpoint), response.StatusCode)
 		}
 		if err := json.Unmarshal(body, target); err != nil {
-			return fmt.Errorf("decode JSON from %s: %w", endpoint, err)
+			return fmt.Errorf("decode JSON from %s: %w", safeEndpoint(endpoint), err)
 		}
 		return nil
 	}
-	return fmt.Errorf("GET %s: request attempts exhausted", endpoint)
+	return fmt.Errorf("GET %s: request attempts exhausted", safeEndpoint(endpoint))
+}
+
+func safeEndpoint(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "external endpoint"
+	}
+	if parsed.Host == "" {
+		return parsed.Path
+	}
+	return parsed.Scheme + "://" + parsed.Host + parsed.Path
 }
 
 func (c *Client) wait(ctx context.Context) error {

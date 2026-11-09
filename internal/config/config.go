@@ -19,18 +19,18 @@ type Config struct {
 
 func Load() Config {
 	c := Config{
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		UserAgent:        os.Getenv("USER_AGENT"),
-		AuthMode:         "none",
-		Delay:            3 * time.Second,
-		MaxPages:         3,
-		MaxListings:      50,
-		ImageStorageMode: "EXTERNAL_URL",
-		ImageCacheDir:    "./var/image-cache",
-		ImageMaxBytes:    20 * 1024 * 1024,
-		ImageCacheTTL:    24 * time.Hour,
-		DetailsTTL:       24 * time.Hour,
-		SourceRefreshEnabled: true,
+		DatabaseURL:          os.Getenv("DATABASE_URL"),
+		UserAgent:            os.Getenv("USER_AGENT"),
+		AuthMode:             "none",
+		Delay:                3 * time.Second,
+		MaxPages:             3,
+		MaxListings:          50,
+		ImageStorageMode:     "EXTERNAL_URL",
+		ImageCacheDir:        "./var/image-cache",
+		ImageMaxBytes:        20 * 1024 * 1024,
+		ImageCacheTTL:        24 * time.Hour,
+		DetailsTTL:           24 * time.Hour,
+		SourceRefreshEnabled: false,
 	}
 	if c.UserAgent == "" {
 		c.UserAgent = "realestate-collector/0.1"
@@ -64,6 +64,8 @@ func Load() Config {
 			c.DetailsTTL = x
 		}
 	}
-	if v := os.Getenv("SOURCE_REFRESH_ENABLED"); v == "false" || v == "0" { c.SourceRefreshEnabled = false }
+	if v := os.Getenv("SOURCE_REFRESH_ENABLED"); v == "true" || v == "1" {
+		c.SourceRefreshEnabled = true
+	}
 	return c
 }

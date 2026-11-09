@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/example/realestate-collector/internal/model"
+	"github.com/example/realestate-collector/internal/sources/httpclient"
 )
 
 const DefaultEndpoint = "https://www.datos.gov.co/resource/7y2j-43cv.json"
@@ -88,6 +89,7 @@ func (s TransactionSource) settings() sourceSettings {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	client.Transport = httpclient.NewLoggingTransport(client.Transport, nil, "igac")
 	pageSize := s.PageSize
 	if pageSize <= 0 || pageSize > 50000 {
 		pageSize = 500

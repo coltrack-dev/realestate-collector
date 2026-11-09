@@ -7,8 +7,8 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:8086',
-      '/health': 'http://127.0.0.1:8086',
+      '/api': process.env.VITE_API_PROXY ?? 'http://127.0.0.1:8086',
+      '/health': process.env.VITE_API_PROXY ?? 'http://127.0.0.1:8086',
     },
   },
 })

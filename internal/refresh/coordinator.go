@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/example/realestate-collector/internal/model"
+	"github.com/example/realestate-collector/internal/sources/httpclient"
 )
 
 type Status string
@@ -21,6 +24,7 @@ const (
 	StatusRunning     Status = "RUNNING"
 	StatusCooldown    Status = "COOLDOWN"
 	StatusUnsupported Status = "UNSUPPORTED"
+	StatusPartial     Status = "PARTIAL"
 	StatusDone        Status = "DONE"
 	StatusFailed      Status = "FAILED"
 )
@@ -33,32 +37,50 @@ type Bounds struct {
 }
 
 func (b Bounds) Valid() bool {
-	return b.MinLongitude <= b.MaxLongitude && b.MinLatitude <= b.MaxLatitude
+	return !math.IsNaN(b.MinLongitude) && !math.IsNaN(b.MaxLongitude) && !math.IsNaN(b.MinLatitude) && !math.IsNaN(b.MaxLatitude) && !math.IsInf(b.MinLongitude, 0) && !math.IsInf(b.MaxLongitude, 0) && !math.IsInf(b.MinLatitude, 0) && !math.IsInf(b.MaxLatitude, 0) && b.MinLongitude >= -180 && b.MaxLongitude <= 180 && b.MinLatitude >= -90 && b.MaxLatitude <= 90 && b.MinLongitude <= b.MaxLongitude && b.MinLatitude <= b.MaxLatitude
 }
 
 type Request struct {
 	CountryCode  string
 	City         string
+	Department   string
 	Bounds       Bounds
 	Operation    string
 	PropertyType string
 }
 
+type CollectResult struct {
+	Listings      []model.Listing
+	FetchedCount  int
+	TotalCount    *int
+	PagesFetched  int
+	Complete      bool
+	PartialReason string
+	NextCursor    string
+	Skipped       bool
+	SkipReason    string
+	RejectedCount int
+}
+
 type Capabilities struct {
-	CountryCode            string
-	SupportsBBox           bool
-	SupportsCity           bool
-	SupportsDepartment     bool
-	SupportsOperation      bool
-	SupportsPropertyType   bool
-	AllowsAutomatedRefresh bool
-	MinRequestInterval     time.Duration
-	CacheTTL               time.Duration
+	CountryCode          string
+	SupportsBBox         bool
+	SupportsCity         bool
+	SupportsDepartment   bool
+	SupportsOperation    bool
+	SupportsPropertyType bool
+	// SupportsUnfilteredSearch means the provider accepts an omitted
+	// operation and/or property type as an explicit ALL filter.
+	SupportsUnfilteredSearch bool
+	SupportedMunicipalities  []string
+	AllowsAutomatedRefresh   bool
+	MinRequestInterval       time.Duration
+	CacheTTL                 time.Duration
 }
 
 type Source interface {
 	Name() string
-	Collect(context.Context, Request, int) ([]model.Listing, error)
+	Collect(context.Context, Request, int) (CollectResult, error)
 }
 
 type Registration struct {
@@ -79,21 +101,31 @@ type Result struct {
 
 type JobStatus struct {
 	Result
-	Error string `json:"error,omitempty"`
+	Error             string   `json:"error,omitempty"`
+	SourceStatuses    []string `json:"source_statuses,omitempty"`
+	ListingsFetched   int      `json:"listings_fetched,omitempty"`
+	ListingsInserted  int      `json:"listings_inserted,omitempty"`
+	ListingsUpdated   int      `json:"listings_updated,omitempty"`
+	ListingsUnchanged int      `json:"listings_unchanged,omitempty"`
+	ListingsRejected  int      `json:"listings_rejected,omitempty"`
 }
 
 type job struct {
 	id        string
-	key       string
+	key       requestIdentity
 	request   Request
 	sources   []Registration
 	createdAt time.Time
 }
 
 type cacheEntry struct {
-	source    string
-	bounds    Bounds
+	identity  requestIdentity
 	expiresAt time.Time
+}
+
+type requestIdentity struct {
+	Source, CountryCode, City, Department, Operation, PropertyType string
+	MinLongitude, MaxLongitude, MinLatitude, MaxLatitude           float64
 }
 
 type Coordinator struct {
@@ -103,7 +135,7 @@ type Coordinator struct {
 
 	mu             sync.Mutex
 	jobs           map[string]JobStatus
-	inFlight       map[string]string
+	inFlight       map[requestIdentity]string
 	lastStarted    map[string]time.Time
 	cache          []cacheEntry
 	clientLast     map[string]time.Time
@@ -111,22 +143,61 @@ type Coordinator struct {
 	maxCache       int
 	clientInterval time.Duration
 	stop           chan struct{}
+	logger         *slog.Logger
+	enabled        bool
 }
 
 func NewCoordinator(saver Saver, registrations []Registration) *Coordinator {
 	c := &Coordinator{
 		saver: saver, registrations: registrations, queue: make(chan job, 100),
-		jobs: make(map[string]JobStatus), inFlight: make(map[string]string),
+		jobs: make(map[string]JobStatus), inFlight: make(map[requestIdentity]string),
 		lastStarted: make(map[string]time.Time), clientLast: make(map[string]time.Time),
-		maxQueue: 100, maxCache: 128, clientInterval: time.Second, stop: make(chan struct{}),
+		maxQueue: 100, maxCache: 128, clientInterval: time.Second, stop: make(chan struct{}), logger: slog.Default(),
+	}
+	for _, registration := range registrations {
+		if registration.Capabilities.AllowsAutomatedRefresh {
+			c.enabled = true
+			break
+		}
 	}
 	go c.worker()
 	return c
 }
 
+func (c *Coordinator) Enabled() bool { return c.enabled }
+
+func (c *Coordinator) AvailableSources(countryCode, municipality string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	result := make([]string, 0)
+	for _, registration := range c.registrations {
+		if registration.Capabilities.AllowsAutomatedRefresh && strings.EqualFold(registration.Capabilities.CountryCode, countryCode) && supportsMunicipality(registration.Capabilities, municipality) {
+			name := registration.Name
+			if name != "" {
+				result = append(result, name)
+			}
+		}
+	}
+	return result
+}
+
+func supportsMunicipality(capabilities Capabilities, municipality string) bool {
+	if len(capabilities.SupportedMunicipalities) == 0 {
+		return true
+	}
+	for _, supported := range capabilities.SupportedMunicipalities {
+		if strings.EqualFold(strings.TrimSpace(supported), strings.TrimSpace(municipality)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Coordinator) Close() { close(c.stop) }
 
 func (c *Coordinator) Request(request Request, clientKey string) Result {
+	request = normalizeRequest(request)
+	c.logger.Info("refresh_requested", "country_code", request.CountryCode, "city", request.City, "operation", request.Operation, "property_type", request.PropertyType)
 	if !request.Bounds.Valid() {
 		return Result{Status: StatusUnsupported}
 	}
@@ -137,17 +208,20 @@ func (c *Coordinator) Request(request Request, clientKey string) Result {
 	}
 	now := time.Now().UTC()
 	if last, ok := c.clientLast[clientKey]; ok && now.Sub(last) < c.clientInterval {
+		c.logger.Info("refresh_cooldown", "country_code", request.CountryCode, "city", request.City, "reason", "client_throttle")
 		return Result{Status: StatusCooldown, RetryAfterSeconds: int((c.clientInterval - now.Sub(last) + time.Second - 1) / time.Second)}
 	}
 	c.clientLast[clientKey] = now
 
-	key := requestKey(request)
+	key := requestIdentityFor(request, "")
 	if id, ok := c.inFlight[key]; ok {
+		c.logger.Debug("refresh_deduplicated", "refresh_id", id, "country_code", request.CountryCode, "city", request.City)
 		return Result{Status: StatusQueued, RefreshID: id}
 	}
 	var selected []Registration
 	maxRetry := 0
 	eligible := false
+	planLimited := false
 	for _, registration := range c.registrations {
 		capability := registration.Capabilities
 		if !capability.AllowsAutomatedRefresh || !strings.EqualFold(capability.CountryCode, request.CountryCode) {
@@ -156,7 +230,15 @@ func (c *Coordinator) Request(request Request, clientKey string) Result {
 		if !capability.SupportsBBox && !capability.SupportsCity {
 			continue
 		}
+		if !supportsMunicipality(capability, request.City) {
+			continue
+		}
 		if capability.SupportsCity && strings.TrimSpace(request.City) == "" && !capability.SupportsBBox {
+			continue
+		}
+		if (request.Operation == "" || request.PropertyType == "") && !capability.SupportsUnfilteredSearch {
+			planLimited = true
+			c.logger.Info("refresh_plan_limited", "source", registration.Name, "country_code", request.CountryCode, "city", request.City, "operation", request.Operation, "property_type", request.PropertyType, "reason", "all_filter_not_supported")
 			continue
 		}
 		eligible = true
@@ -172,27 +254,37 @@ func (c *Coordinator) Request(request Request, clientKey string) Result {
 			}
 			continue
 		}
-		if c.coveredLocked(name, request.Bounds, now) {
+		if c.coveredLocked(requestIdentityFor(request, name), now) {
+			c.logger.Debug("refresh_cache_hit", "source", name, "country_code", request.CountryCode, "city", request.City)
 			continue
 		}
 		selected = append(selected, registration)
 	}
 	if len(selected) == 0 {
 		if maxRetry > 0 {
+			c.logger.Info("refresh_cooldown", "country_code", request.CountryCode, "city", request.City, "retry_after_seconds", maxRetry)
 			return Result{Status: StatusCooldown, RetryAfterSeconds: maxRetry}
 		}
 		if eligible {
+			c.logger.Debug("refresh_skipped", "country_code", request.CountryCode, "city", request.City, "reason", "covered_or_no_source")
 			return Result{Status: StatusSkipped}
+		}
+		if planLimited {
+			c.logger.Info("refresh_skipped", "country_code", request.CountryCode, "city", request.City, "operation", request.Operation, "property_type", request.PropertyType, "reason", "refresh_plan_limited")
+			return Result{Status: StatusUnsupported}
 		}
 		return Result{Status: StatusUnsupported}
 	}
+	c.logger.Info("refresh_plan_created", "country_code", request.CountryCode, "city", request.City, "operation", request.Operation, "property_type", request.PropertyType, "query_count", len(selected))
 	if len(c.queue) >= c.maxQueue {
+		c.logger.Warn("refresh_cooldown", "country_code", request.CountryCode, "city", request.City, "reason", "queue_full", "queue_length", len(c.queue))
 		return Result{Status: StatusCooldown, RetryAfterSeconds: 5}
 	}
 	id := newID()
 	c.jobs[id] = JobStatus{Result: Result{Status: StatusQueued, RefreshID: id}}
 	c.inFlight[key] = id
 	c.queue <- job{id: id, key: key, request: request, sources: selected, createdAt: now}
+	c.logger.Info("refresh_queued", "refresh_id", id, "country_code", request.CountryCode, "city", request.City, "queue_length", len(c.queue))
 	return Result{Status: StatusQueued, RefreshID: id}
 }
 
@@ -215,12 +307,20 @@ func (c *Coordinator) worker() {
 }
 
 func (c *Coordinator) run(current job) {
+	started := time.Now()
+	waitMS := started.Sub(current.createdAt).Milliseconds()
+	c.logger.Info("refresh_started", "refresh_id", current.id, "queue_wait_duration_ms", waitMS, "queue_length", len(c.queue), "country_code", current.request.CountryCode, "city", current.request.City, "operation", current.request.Operation, "property_type", current.request.PropertyType)
 	c.mu.Lock()
 	c.jobs[current.id] = JobStatus{Result: Result{Status: StatusRunning, RefreshID: current.id}}
 	c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	var runErr error
+	listingsFetched, listingsInserted, listingsUpdated, listingsUnchanged, listingsRejected, snapshots := 0, 0, 0, 0, 0, 0
+	partial := false
+	partialReasons := make([]string, 0)
+	failedSources, successfulSources, skippedSources := 0, 0, 0
+	sourceStatuses := make([]string, 0, len(current.sources))
 	for _, registration := range current.sources {
 		name := registration.Name
 		if name == "" {
@@ -230,48 +330,118 @@ func (c *Coordinator) run(current job) {
 		c.lastStarted[registration.Capabilities.CountryCode+":"+name] = time.Now().UTC()
 		c.mu.Unlock()
 		source := registration.Factory(current.request)
-		listings, err := source.Collect(ctx, current.request, 50)
+		sourceContext := httpclient.WithMetadata(ctx, httpclient.RequestMetadata{Source: name, RefreshID: current.id, Operation: current.request.Operation, City: current.request.City, CountryCode: current.request.CountryCode})
+		requestStarted := time.Now()
+		c.logger.Info("source_request_started", "refresh_id", current.id, "source", name, "country_code", current.request.CountryCode, "city", current.request.City, "operation", current.request.Operation, "property_type", current.request.PropertyType)
+		collected, err := source.Collect(sourceContext, current.request, 50)
 		if err != nil {
+			failedSources++
+			sourceStatuses = append(sourceStatuses, name+":failed")
+			c.logger.Warn("refresh_source_error", "refresh_id", current.id, "source", name, "error", err)
+			c.logger.Warn("source_request_completed", "refresh_id", current.id, "source", name, "result", "error", "duration_ms", time.Since(requestStarted).Milliseconds(), "reason", "adapter_error")
 			runErr = errors.Join(runErr, fmt.Errorf("%s: %w", name, err))
+			partialReasons = append(partialReasons, name+": request_failed")
 			continue
 		}
-		for _, listing := range listings {
-			if _, _, err := c.saver.Save(ctx, listing); err != nil {
-				runErr = errors.Join(runErr, err)
+		c.logger.Info("source_request_completed", "refresh_id", current.id, "source", name, "result", "success", "duration_ms", time.Since(requestStarted).Milliseconds(), "fetched", collected.FetchedCount, "rejected", collected.RejectedCount, "complete", collected.Complete, "reason", collected.PartialReason)
+		if collected.Skipped {
+			skippedSources++
+			sourceStatuses = append(sourceStatuses, name+":skipped:"+collected.SkipReason)
+			partial = true
+			if collected.SkipReason != "" {
+				partialReasons = append(partialReasons, name+": "+collected.SkipReason)
+			}
+			c.logger.Info("refresh_source_skipped", "refresh_id", current.id, "source", name, "reason", collected.SkipReason)
+			continue
+		}
+		successfulSources++
+		sourceStatuses = append(sourceStatuses, name+":success")
+		listingsFetched += collected.FetchedCount
+		listingsRejected += collected.RejectedCount
+		c.logger.Info("source_items_parsed", "refresh_id", current.id, "source", name, "parsed", collected.FetchedCount, "rejected", collected.RejectedCount, "pages_fetched", collected.PagesFetched, "complete", collected.Complete, "reason", collected.PartialReason)
+		if collected.RejectedCount > 0 {
+			c.logger.Warn("source_items_rejected", "refresh_id", current.id, "source", name, "rejected", collected.RejectedCount, "reason", "normalization_or_missing_identifier")
+		}
+		if !collected.Complete || !registration.Capabilities.SupportsBBox {
+			partial = true
+			if !registration.Capabilities.SupportsBBox {
+				partialReasons = append(partialReasons, name+": city_filter_does_not_prove_bbox_coverage")
+			} else if collected.PartialReason != "" {
+				partialReasons = append(partialReasons, name+": "+collected.PartialReason)
 			}
 		}
-		c.mu.Lock()
-		ttl := registration.Capabilities.CacheTTL
-		if ttl <= 0 {
-			ttl = 5 * time.Minute
+		sourceSaveFailed := false
+		for _, listing := range collected.Listings {
+			created, updated, err := c.saver.Save(ctx, listing)
+			if err != nil {
+				sourceSaveFailed = true
+				runErr = errors.Join(runErr, err)
+				c.logger.Warn("refresh_save_error", "refresh_id", current.id, "source", name, "reason", "postgres_save", "error", err)
+			} else {
+				if created {
+					listingsInserted++
+					c.logger.Debug("listings_inserted", "refresh_id", current.id, "source", name, "count", 1)
+				}
+				if updated {
+					listingsUpdated++
+					snapshots++
+					c.logger.Debug("listings_updated", "refresh_id", current.id, "source", name, "count", 1)
+				}
+				if !created && !updated {
+					listingsUnchanged++
+					c.logger.Debug("listings_unchanged", "refresh_id", current.id, "source", name, "count", 1)
+				}
+			}
 		}
-		c.cache = append(c.cache, cacheEntry{source: name, bounds: current.request.Bounds, expiresAt: time.Now().UTC().Add(ttl)})
-		if len(c.cache) > c.maxCache {
-			c.cache = c.cache[len(c.cache)-c.maxCache:]
+		if collected.Complete && registration.Capabilities.SupportsBBox && !sourceSaveFailed {
+			c.mu.Lock()
+			ttl := registration.Capabilities.CacheTTL
+			if ttl <= 0 {
+				ttl = 5 * time.Minute
+			}
+			c.cache = append(c.cache, cacheEntry{identity: requestIdentityFor(current.request, name), expiresAt: time.Now().UTC().Add(ttl)})
+			if len(c.cache) > c.maxCache {
+				c.cache = c.cache[len(c.cache)-c.maxCache:]
+			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
 	}
 	c.mu.Lock()
 	delete(c.inFlight, current.key)
-	if runErr != nil {
-		c.jobs[current.id] = JobStatus{Result: Result{Status: StatusFailed, RefreshID: current.id}, Error: runErr.Error()}
+	if runErr != nil && successfulSources == 0 {
+		c.jobs[current.id] = JobStatus{Result: Result{Status: StatusFailed, RefreshID: current.id}, Error: runErr.Error(), SourceStatuses: sourceStatuses, ListingsFetched: listingsFetched, ListingsInserted: listingsInserted, ListingsUpdated: listingsUpdated, ListingsUnchanged: listingsUnchanged, ListingsRejected: listingsRejected}
+		c.logger.Error("refresh_failed", "refresh_id", current.id, "execution_duration_ms", time.Since(started).Milliseconds(), "listings_fetched", listingsFetched, "listings_inserted", listingsInserted, "listings_updated", listingsUpdated, "snapshot_count", snapshots, "error", runErr)
+	} else if runErr != nil || partial || skippedSources > 0 || failedSources > 0 {
+		c.jobs[current.id] = JobStatus{Result: Result{Status: StatusPartial, RefreshID: current.id}, Error: strings.Join(partialReasons, "; "), SourceStatuses: sourceStatuses, ListingsFetched: listingsFetched, ListingsInserted: listingsInserted, ListingsUpdated: listingsUpdated, ListingsUnchanged: listingsUnchanged, ListingsRejected: listingsRejected}
+		c.logger.Info("refresh_completed", "refresh_id", current.id, "status", StatusPartial, "execution_duration_ms", time.Since(started).Milliseconds(), "listings_fetched", listingsFetched, "listings_inserted", listingsInserted, "listings_updated", listingsUpdated, "snapshot_count", snapshots, "source_statuses", sourceStatuses, "reason", strings.Join(partialReasons, "; "))
 	} else {
-		c.jobs[current.id] = JobStatus{Result: Result{Status: StatusDone, RefreshID: current.id}}
+		c.jobs[current.id] = JobStatus{Result: Result{Status: StatusDone, RefreshID: current.id}, SourceStatuses: sourceStatuses, ListingsFetched: listingsFetched, ListingsInserted: listingsInserted, ListingsUpdated: listingsUpdated, ListingsUnchanged: listingsUnchanged, ListingsRejected: listingsRejected}
+		c.logger.Info("refresh_completed", "refresh_id", current.id, "execution_duration_ms", time.Since(started).Milliseconds(), "listings_fetched", listingsFetched, "listings_inserted", listingsInserted, "listings_updated", listingsUpdated, "snapshot_count", snapshots)
 	}
 	c.mu.Unlock()
 }
 
-func (c *Coordinator) coveredLocked(source string, bounds Bounds, now time.Time) bool {
+func (c *Coordinator) coveredLocked(identity requestIdentity, now time.Time) bool {
 	for _, entry := range c.cache {
-		if entry.source == source && entry.expiresAt.After(now) && entry.bounds.MinLongitude <= bounds.MinLongitude && entry.bounds.MaxLongitude >= bounds.MaxLongitude && entry.bounds.MinLatitude <= bounds.MinLatitude && entry.bounds.MaxLatitude >= bounds.MaxLatitude {
+		if entry.identity == identity && entry.expiresAt.After(now) {
 			return true
 		}
 	}
 	return false
 }
 
-func requestKey(request Request) string {
-	return fmt.Sprintf("%s|%s|%.2f,%.2f,%.2f,%.2f|%s|%s", strings.ToUpper(request.CountryCode), strings.ToLower(request.City), request.Bounds.MinLongitude, request.Bounds.MaxLongitude, request.Bounds.MinLatitude, request.Bounds.MaxLatitude, strings.ToUpper(request.Operation), strings.ToUpper(request.PropertyType))
+func normalizeRequest(request Request) Request {
+	request.CountryCode = strings.ToUpper(strings.TrimSpace(request.CountryCode))
+	request.City = strings.TrimSpace(request.City)
+	request.Department = strings.TrimSpace(request.Department)
+	request.Operation = strings.ToUpper(strings.TrimSpace(request.Operation))
+	request.PropertyType = strings.ToUpper(strings.TrimSpace(request.PropertyType))
+	return request
+}
+
+func requestIdentityFor(request Request, source string) requestIdentity {
+	request = normalizeRequest(request)
+	return requestIdentity{Source: strings.ToLower(strings.TrimSpace(source)), CountryCode: request.CountryCode, City: strings.ToLower(request.City), Department: strings.ToLower(request.Department), Operation: request.Operation, PropertyType: request.PropertyType, MinLongitude: request.Bounds.MinLongitude, MaxLongitude: request.Bounds.MaxLongitude, MinLatitude: request.Bounds.MinLatitude, MaxLatitude: request.Bounds.MaxLatitude}
 }
 func newID() string {
 	var bytes [12]byte

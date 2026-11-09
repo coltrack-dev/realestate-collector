@@ -171,16 +171,33 @@ POST /api/v1/listings/{id}/refresh-details
 GET /api/v1/stats
 POST /api/v1/source-refresh
 GET /api/v1/source-refresh/{id}
+
+GET /api/v1/geo/resolve?longitude=-74.07&latitude=4.71
 ```
 
 Listing reads are read-only and use parameterized PostgreSQL queries, with pages
 capped at 100 records. `POST /api/v1/source-refresh` only queues a bounded,
 asynchronous refresh for configured sources; it never accepts arbitrary external
-URLs. VIXORA and D.C Colombia require a city filter and are throttled per source;
+URLs. The required city is resolved from the current map viewport. Empty
+`operation` and/or `property_type` values explicitly mean `ALL`; the server
+passes that only to sources declaring support for unfiltered searches and keeps
+the plan bounded to the registered source queries. VIXORA and D.C Colombia are
+throttled per source;
 Gallito is registered but disabled until automated aggregation is explicitly
-permitted. Set `SOURCE_REFRESH_ENABLED=false` to disable refresh globally. The
+permitted. Source refresh creation is disabled by default; set
+`SOURCE_REFRESH_ENABLED=true` only in a trusted, protected deployment. The
 endpoint is intended for localhost or a protected deployment and does not expose
 contact details.
+
+Geographic resolution uses an optional local GeoJSON FeatureCollection configured
+with `GEO_BOUNDARIES_PATH`. Each feature must provide `country_code`,
+`department`, and `municipality` properties and Polygon or MultiPolygon geometry.
+If the file is not configured, `/api/v1/geo/resolve` returns `resolution=UNKNOWN`
+and the map does not invent a municipality or start a nationwide refresh.
+
+External request and refresh lifecycle logging is documented in
+[`docs/HTTP_LOGGING.md`](docs/HTTP_LOGGING.md). HTTP request starts are DEBUG;
+completed requests and refresh summaries use structured `slog` fields.
 
 ## Web UI
 

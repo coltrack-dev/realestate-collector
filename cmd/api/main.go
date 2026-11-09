@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/example/realestate-collector/internal/api"
-	"github.com/example/realestate-collector/internal/config"
-	"github.com/example/realestate-collector/internal/model"
-	"github.com/example/realestate-collector/internal/refresh"
 	"github.com/example/realestate-collector/internal/collector"
+	"github.com/example/realestate-collector/internal/config"
+	"github.com/example/realestate-collector/internal/geo"
+	"github.com/example/realestate-collector/internal/refresh"
 	"github.com/example/realestate-collector/internal/sources/dccolombia"
 	"github.com/example/realestate-collector/internal/sources/gallito"
 	"github.com/example/realestate-collector/internal/sources/vixora"
@@ -46,36 +46,44 @@ func main() {
 	}, settings.DetailsTTL)
 	coordinator := refresh.NewCoordinator(store, []refresh.Registration{
 		{
-			Name: "vixora",
-			Capabilities: refresh.Capabilities{CountryCode: "CO", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, AllowsAutomatedRefresh: settings.SourceRefreshEnabled, MinRequestInterval: 5 * time.Second, CacheTTL: 5 * time.Minute},
+			Name:         "vixora",
+			Capabilities: refresh.Capabilities{CountryCode: "CO", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, SupportsUnfilteredSearch: true, SupportedMunicipalities: vixora.SupportedMunicipalities(), AllowsAutomatedRefresh: settings.SourceRefreshEnabled, MinRequestInterval: 5 * time.Second, CacheTTL: 5 * time.Minute},
 			Factory: func(request refresh.Request) refresh.Source {
 				source := vixora.New(nil, settings.UserAgent, settings.Delay)
 				source.Operation, source.PropertyType, source.Municipality = request.Operation, request.PropertyType, request.City
-				return sourceAdapter{source: source}
+				return sourceAdapter{source: source, collect: func(ctx context.Context, limit int) (refresh.CollectResult, error) {
+					return source.CollectForRefresh(ctx, limit)
+				}}
 			},
 		},
 		{
-			Name: "dccolombia",
-			Capabilities: refresh.Capabilities{CountryCode: "CO", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, AllowsAutomatedRefresh: settings.SourceRefreshEnabled, MinRequestInterval: 5 * time.Second, CacheTTL: 5 * time.Minute},
+			Name:         "dccolombia",
+			Capabilities: refresh.Capabilities{CountryCode: "CO", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, SupportsUnfilteredSearch: true, AllowsAutomatedRefresh: settings.SourceRefreshEnabled, MinRequestInterval: 5 * time.Second, CacheTTL: 5 * time.Minute},
 			Factory: func(request refresh.Request) refresh.Source {
 				source := dccolombia.New(nil, settings.UserAgent, settings.Delay)
 				source.City, source.Operation, source.PropertyType = request.City, request.Operation, request.PropertyType
-				return sourceAdapter{source: source}
+				return sourceAdapter{source: source, collect: func(ctx context.Context, limit int) (refresh.CollectResult, error) {
+					return source.CollectForRefresh(ctx, limit)
+				}}
 			},
 		},
 		{
-			Name: "gallito",
+			Name:         "gallito",
 			Capabilities: refresh.Capabilities{CountryCode: "UY", SupportsCity: true, SupportsOperation: true, SupportsPropertyType: true, AllowsAutomatedRefresh: false},
 		},
 	})
 	defer coordinator.Close()
+	geoResolver, err := geo.NewFromFile(os.Getenv("GEO_BOUNDARIES_PATH"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	server := &http.Server{
-		Addr: address, Handler: api.NewServerWithRefresh(repository, details, coordinator),
+		Addr: address, Handler: api.NewServerWithGeo(repository, details, coordinator, geoResolver),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	go func() {
-		slog.Info("listings API listening", "address", address)
+		slog.Info("listings API listening", "address", address, "source_refresh_enabled", coordinator.Enabled(), "geo_boundaries_configured", os.Getenv("GEO_BOUNDARIES_PATH") != "")
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("API server: %v", err)
 		}
@@ -88,6 +96,16 @@ func main() {
 	}
 }
 
-type sourceAdapter struct { source collector.Source }
+type sourceAdapter struct {
+	source  collector.Source
+	collect func(context.Context, int) (refresh.CollectResult, error)
+}
+
 func (s sourceAdapter) Name() string { return s.source.Name() }
-func (s sourceAdapter) Collect(ctx context.Context, _ refresh.Request, limit int) ([]model.Listing, error) { return s.source.Collect(ctx, limit) }
+func (s sourceAdapter) Collect(ctx context.Context, _ refresh.Request, limit int) (refresh.CollectResult, error) {
+	if s.collect != nil {
+		return s.collect(ctx, limit)
+	}
+	listings, err := s.source.Collect(ctx, limit)
+	return refresh.CollectResult{Listings: listings, FetchedCount: len(listings), Complete: false, PartialReason: "adapter_completeness_unknown"}, err
+}

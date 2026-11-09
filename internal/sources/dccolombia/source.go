@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,25 +14,28 @@ import (
 	"github.com/example/realestate-collector/internal/collector"
 	"github.com/example/realestate-collector/internal/model"
 	"github.com/example/realestate-collector/internal/normalize"
+	"github.com/example/realestate-collector/internal/refresh"
 	"github.com/example/realestate-collector/internal/sources/httpclient"
 )
 
 const DefaultEndpoint = "https://www.dccolombia.com.co/api/properties"
 
 type Source struct {
-	Client   *httpclient.Client
-	Endpoint string
+	Client                        *httpclient.Client
+	Endpoint                      string
 	City, Operation, PropertyType string
 }
 
 func New(httpClient *http.Client, userAgent string, delay time.Duration) Source {
-	return Source{Client: httpclient.New(httpClient, userAgent, delay), Endpoint: DefaultEndpoint}
+	client := httpclient.New(httpClient, userAgent, delay)
+	client.SetSource("dccolombia")
+	return Source{Client: client, Endpoint: DefaultEndpoint}
 }
 
 func (s Source) Name() string { return "dccolombia" }
 
 type response struct {
-	Properties []property `json:"properties"`
+	Properties *[]property `json:"properties"`
 }
 
 type property struct {
@@ -60,40 +64,111 @@ type property struct {
 }
 
 func (s Source) Collect(ctx context.Context, limit int) ([]model.Listing, error) {
+	listings, _, err := s.collect(ctx, limit)
+	return listings, err
+}
+
+func (s Source) collect(ctx context.Context, limit int) ([]model.Listing, int, error) {
 	if limit <= 0 {
-		return nil, fmt.Errorf("limit must be greater than zero")
+		return nil, 0, fmt.Errorf("limit must be greater than zero")
 	}
 	if s.Client == nil {
 		s.Client = httpclient.New(nil, "realestate-collector/0.1", 3*time.Second)
+		s.Client.SetSource("dccolombia")
 	}
 	if s.Endpoint == "" {
 		s.Endpoint = DefaultEndpoint
 	}
 	endpoint, err := url.Parse(s.Endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("parse D.C Colombia endpoint: %w", err)
+		return nil, 0, fmt.Errorf("parse D.C Colombia endpoint: %w", err)
 	}
 	query := endpoint.Query()
-	if s.City != "" { query.Set("city", s.City) }
-	if s.Operation != "" { query.Set("operation", s.Operation) }
-	if s.PropertyType != "" { query.Set("property_type", s.PropertyType) }
+	if s.City != "" {
+		query.Set("city", s.City)
+	}
+	operation, err := providerOperation(s.Operation)
+	if err != nil {
+		return nil, 0, err
+	}
+	if operation != "" {
+		query.Set("operation", operation)
+	}
+	propertyType, err := providerPropertyType(s.PropertyType)
+	if err != nil {
+		return nil, 0, err
+	}
+	if propertyType != "" {
+		query.Set("property_type", propertyType)
+	}
 	endpoint.RawQuery = query.Encode()
+	slog.Debug("dccolombia_query", "city", s.City, "operation", operation, "property_type", propertyType)
 	var page response
 	if err := s.Client.GetJSON(ctx, endpoint.String(), &page); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if len(page.Properties) > limit {
-		page.Properties = page.Properties[:limit]
+	if page.Properties == nil {
+		return nil, 0, fmt.Errorf("D.C Colombia response has no properties field")
 	}
-	listings := make([]model.Listing, 0, len(page.Properties))
-	for _, item := range page.Properties {
+	properties := *page.Properties
+	if len(properties) > limit {
+		properties = properties[:limit]
+	}
+	listings := make([]model.Listing, 0, len(properties))
+	rejected := 0
+	for _, item := range properties {
 		listing, err := toListing(item)
 		if err != nil {
+			rejected++
 			continue
 		}
 		listings = append(listings, listing)
 	}
-	return listings, nil
+	return listings, rejected, nil
+}
+
+func providerOperation(value string) (string, error) {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "":
+		return "", nil
+	case "SALE":
+		return "sale", nil
+	case "RENT":
+		return "rent", nil
+	default:
+		return "", fmt.Errorf("D.C Colombia does not support operation %q", value)
+	}
+}
+
+func providerPropertyType(value string) (string, error) {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "":
+		return "", nil
+	case "APARTMENT":
+		return "apartment", nil
+	case "HOUSE":
+		return "house", nil
+	case "LAND":
+		return "lot", nil
+	case "COMMERCIAL":
+		return "commercial", nil
+	default:
+		return "", fmt.Errorf("D.C Colombia does not support property type %q", value)
+	}
+}
+
+func (s Source) CollectForRefresh(ctx context.Context, limit int) (refresh.CollectResult, error) {
+	listings, rejected, err := s.collect(ctx, limit)
+	if err != nil {
+		return refresh.CollectResult{}, err
+	}
+	result := refresh.CollectResult{Listings: listings, FetchedCount: len(listings), RejectedCount: rejected, PagesFetched: 1}
+	if len(listings) == 0 {
+		result.Complete = true
+	} else {
+		result.PartialReason = "provider_pagination_unknown"
+	}
+	return result, nil
 }
 
 func toListing(item property) (model.Listing, error) {

@@ -3,6 +3,7 @@ package vixora
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"github.com/example/realestate-collector/internal/collector"
 	"github.com/example/realestate-collector/internal/model"
 	"github.com/example/realestate-collector/internal/normalize"
+	"github.com/example/realestate-collector/internal/refresh"
 	"github.com/example/realestate-collector/internal/sources/httpclient"
 )
 
@@ -25,8 +27,78 @@ type Source struct {
 	Municipality string
 }
 
+// VIXORA exposes Spanish, lower-case filter values. These mappings are kept
+// here instead of leaking provider-specific values into the coordinator.
+var operationValues = map[string]string{
+	"SALE": "venta",
+	"RENT": "arriendo",
+}
+
+var propertyTypeValues = map[string]string{
+	"APARTMENT":  "apartamento",
+	"HOUSE":      "casa",
+	"LAND":       "lote",
+	"COMMERCIAL": "local",
+}
+
+// This is a deliberately conservative local cache of municipalities observed
+// in the provider's public locations/inventory documentation and fixtures.
+// Unknown municipalities are rejected rather than causing a broad provider
+// query. Refresh this list only from the provider's /locations contract.
+var supportedMunicipalities = map[string]string{
+	"el penol":           "el-penol",
+	"el retiro":          "el-retiro",
+	"guarne":             "guarne",
+	"guatape":            "guatape",
+	"la ceja":            "la-ceja",
+	"marinilla":          "marinilla",
+	"rionegro":           "rionegro",
+	"san vicente ferrer": "san-vicente-ferrer",
+}
+
+func SupportedMunicipalities() []string {
+	return []string{"El Peñol", "El Retiro", "Guarne", "Guatapé", "La Ceja", "Marinilla", "Rionegro", "San Vicente Ferrer"}
+}
+
+func providerFilters(operation, propertyType, municipality string) (string, string, string, string) {
+	if strings.TrimSpace(operation) == "" && strings.TrimSpace(propertyType) == "" && strings.TrimSpace(municipality) == "" {
+		return "", "", "", ""
+	}
+	apiOperation := ""
+	if value := strings.ToUpper(strings.TrimSpace(operation)); value != "" {
+		mapped, ok := operationValues[value]
+		if !ok {
+			return "", "", "", "unsupported_operation"
+		}
+		apiOperation = mapped
+	}
+	apiPropertyType := ""
+	if value := strings.ToUpper(strings.TrimSpace(propertyType)); value != "" {
+		mapped, ok := propertyTypeValues[value]
+		if !ok {
+			return "", "", "", "unsupported_property_type"
+		}
+		apiPropertyType = mapped
+	}
+	apiMunicipality, municipalityOK := normalizeMunicipality(municipality)
+	if !municipalityOK {
+		return "", "", "", "unsupported_municipality"
+	}
+	return apiOperation, apiPropertyType, apiMunicipality, ""
+}
+
+func normalizeMunicipality(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.NewReplacer("á", "a", "é", "e", "í", "i", "ó", "o", "ú", "u", "ü", "u").Replace(value)
+	value = strings.Join(strings.Fields(strings.ReplaceAll(value, "-", " ")), " ")
+	municipality, ok := supportedMunicipalities[value]
+	return municipality, ok
+}
+
 func New(httpClient *http.Client, userAgent string, delay time.Duration) Source {
-	return Source{Client: httpclient.New(httpClient, userAgent, delay), Endpoint: DefaultEndpoint}
+	client := httpclient.New(httpClient, userAgent, delay)
+	client.SetSource("vixora")
+	return Source{Client: client, Endpoint: DefaultEndpoint}
 }
 
 func (s Source) Name() string { return "vixora" }
@@ -37,6 +109,7 @@ type response struct {
 		Page       int `json:"page"`
 		PageSize   int `json:"page_size"`
 		TotalPages int `json:"total_pages"`
+		Total      int `json:"total"`
 		Next       any `json:"next"`
 	} `json:"pagination"`
 }
@@ -75,57 +148,89 @@ type property struct {
 }
 
 func (s Source) Collect(ctx context.Context, limit int) ([]model.Listing, error) {
+	result, err := s.CollectForRefresh(ctx, limit)
+	return result.Listings, err
+}
+
+func (s Source) CollectForRefresh(ctx context.Context, limit int) (refresh.CollectResult, error) {
 	if limit <= 0 {
-		return nil, fmt.Errorf("limit must be greater than zero")
+		return refresh.CollectResult{}, fmt.Errorf("limit must be greater than zero")
 	}
 	if s.Client == nil {
 		s.Client = httpclient.New(nil, "realestate-collector/0.1", 3*time.Second)
+		s.Client.SetSource("vixora")
 	}
 	if s.Endpoint == "" {
 		s.Endpoint = DefaultEndpoint
+	}
+	apiOperation, apiPropertyType, apiMunicipality, reason := providerFilters(s.Operation, s.PropertyType, s.Municipality)
+	if reason != "" {
+		slog.Debug("vixora_refresh_skipped", "reason", reason, "operation", strings.ToUpper(strings.TrimSpace(s.Operation)), "property_type", strings.ToUpper(strings.TrimSpace(s.PropertyType)), "municipality", strings.TrimSpace(s.Municipality))
+		return refresh.CollectResult{Skipped: true, SkipReason: reason, Complete: true}, nil
 	}
 	pageSize := limit
 	if pageSize > 50 {
 		pageSize = 50
 	}
 	var listings []model.Listing
+	pagesFetched := 0
+	complete := false
+	partialReason := ""
+	var totalCount *int
+	rejected := 0
 	for page := 1; len(listings) < limit; page++ {
 		endpoint, err := url.Parse(s.Endpoint)
 		if err != nil {
-			return nil, fmt.Errorf("parse VIXORA endpoint: %w", err)
+			return refresh.CollectResult{}, fmt.Errorf("parse VIXORA endpoint: %w", err)
 		}
 		query := endpoint.Query()
 		query.Set("page", strconv.Itoa(page))
 		query.Set("page_size", strconv.Itoa(pageSize))
-		if s.Operation != "" {
-			query.Set("operation", s.Operation)
+		if apiOperation != "" {
+			query.Set("operation", apiOperation)
 		}
-		if s.PropertyType != "" {
-			query.Set("type", s.PropertyType)
+		if apiPropertyType != "" {
+			query.Set("type", apiPropertyType)
 		}
-		if s.Municipality != "" {
-			query.Set("municipality", s.Municipality)
+		if apiMunicipality != "" {
+			query.Set("municipality", apiMunicipality)
 		}
 		endpoint.RawQuery = query.Encode()
+		slog.Debug("vixora_query", "operation", apiOperation, "type", apiPropertyType, "municipality", apiMunicipality, "page", page, "page_size", pageSize)
 		var pageResponse response
 		if err := s.Client.GetJSON(ctx, endpoint.String(), &pageResponse); err != nil {
-			return nil, err
+			return refresh.CollectResult{}, err
+		}
+		pagesFetched++
+		if pageResponse.Pagination.Total > 0 {
+			total := pageResponse.Pagination.Total
+			totalCount = &total
 		}
 		for _, item := range pageResponse.Data {
 			listing, err := toListing(item)
 			if err != nil {
+				rejected++
 				continue
 			}
 			listings = append(listings, listing)
 			if len(listings) == limit {
-				return listings, nil
+				if pageResponse.Pagination.TotalPages > 0 && page >= pageResponse.Pagination.TotalPages {
+					complete = true
+				} else {
+					partialReason = "limit_reached"
+				}
+				return refresh.CollectResult{Listings: listings, FetchedCount: len(listings), RejectedCount: rejected, TotalCount: totalCount, PagesFetched: pagesFetched, Complete: complete, PartialReason: partialReason}, nil
 			}
 		}
 		if len(pageResponse.Data) == 0 || (pageResponse.Pagination.TotalPages > 0 && page >= pageResponse.Pagination.TotalPages) {
+			complete = true
 			break
 		}
 	}
-	return listings, nil
+	if !complete {
+		partialReason = "pagination_exhaustion_not_proven"
+	}
+	return refresh.CollectResult{Listings: listings, FetchedCount: len(listings), RejectedCount: rejected, TotalCount: totalCount, PagesFetched: pagesFetched, Complete: complete, PartialReason: partialReason}, nil
 }
 
 func (s Source) FetchDetails(ctx context.Context, externalID string) (model.Listing, error) {
@@ -134,6 +239,7 @@ func (s Source) FetchDetails(ctx context.Context, externalID string) (model.List
 	}
 	if s.Client == nil {
 		s.Client = httpclient.New(nil, "realestate-collector/0.1", 3*time.Second)
+		s.Client.SetSource("vixora")
 	}
 	if s.Endpoint == "" {
 		s.Endpoint = DefaultEndpoint

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/example/realestate-collector/internal/sources/httpclient"
@@ -43,6 +44,59 @@ func TestCollectParsesDocumentationFixture(t *testing.T) {
 	}
 	if len(listings[0].Images) != 1 || listings[0].Images[0] != "https://media.example.invalid/fin-0012.jpg" {
 		t.Fatalf("summary should keep only the cover photo: %#v", listings[0].Images)
+	}
+}
+
+func TestCollectMapsInternalFiltersToVixoraContract(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		query := r.URL.Query()
+		if query.Get("operation") != "venta" || query.Get("type") != "apartamento" || query.Get("municipality") != "rionegro" {
+			return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(`{"detail":"invalid filter"}`))}, nil
+		}
+		return jsonResponse([]byte(`{"data":[],"pagination":{"page":1,"page_size":1,"total":0,"total_pages":1}}`)), nil
+	})
+	source := Source{Client: httpclient.New(&http.Client{Transport: transport}, "test", 0), Endpoint: "https://fixture.invalid/properties", Operation: "SALE", PropertyType: "APARTMENT", Municipality: "Rionegro"}
+	result, err := source.CollectForRefresh(context.Background(), 1)
+	if err != nil || result.Skipped || result.FetchedCount != 0 || !result.Complete {
+		t.Fatalf("unexpected mapped request result: %+v, %v", result, err)
+	}
+}
+
+func TestCollectAllowsALLOperationAndPropertyType(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		query := r.URL.Query()
+		if query.Get("operation") != "" || query.Get("type") != "" || query.Get("municipality") != "rionegro" {
+			t.Fatalf("unexpected ALL query: %s", r.URL.RawQuery)
+		}
+		return jsonResponse([]byte(`{"data":[],"pagination":{"page":1,"page_size":1,"total":0,"total_pages":1}}`)), nil
+	})
+	source := Source{Client: httpclient.New(&http.Client{Transport: transport}, "test", 0), Endpoint: "https://fixture.invalid/properties", Municipality: "Rionegro"}
+	result, err := source.CollectForRefresh(context.Background(), 1)
+	if err != nil || result.Skipped || !result.Complete {
+		t.Fatalf("unexpected ALL result: %+v, %v", result, err)
+	}
+}
+
+func TestCollectReturnsHTTP400AsProviderError(t *testing.T) {
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(`{"detail":"unsupported municipality"}`))}, nil
+	})
+	source := Source{Client: httpclient.New(&http.Client{Transport: transport}, "test", 0), Endpoint: "https://fixture.invalid/properties", Operation: "SALE", PropertyType: "APARTMENT", Municipality: "rionegro"}
+	if _, err := source.CollectForRefresh(context.Background(), 1); err == nil {
+		t.Fatal("HTTP 400 should be returned as a provider error")
+	}
+}
+
+func TestCollectSkipsUnsupportedMunicipalityWithoutHTTPRequest(t *testing.T) {
+	called := false
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return jsonResponse([]byte(`{}`)), nil
+	})
+	source := Source{Client: httpclient.New(&http.Client{Transport: transport}, "test", 0), Endpoint: "https://fixture.invalid/properties", Operation: "SALE", PropertyType: "APARTMENT", Municipality: "Bogotá D.C."}
+	result, err := source.CollectForRefresh(context.Background(), 1)
+	if err != nil || !result.Skipped || result.SkipReason != "unsupported_municipality" || called {
+		t.Fatalf("unsupported municipality was not skipped: %+v, %v, called=%v", result, err, called)
 	}
 }
 

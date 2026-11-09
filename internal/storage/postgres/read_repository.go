@@ -38,7 +38,10 @@ SELECT l.id, ds.name, l.external_id, l.url, l.title, l.description,
 		l.bedrooms, l.bathrooms, l.parking_spots, l.country, l.country_code, l.department,
 		l.city, l.neighborhood, l.address, l.latitude, l.longitude,
 		l.resolved_latitude, l.resolved_longitude, l.location_precision,
-		l.geocode_provider, l.geocoded_at, l.images,
+		l.geocode_provider, l.geocoded_at,
+		COALESCE((SELECT jsonb_agg(li.original_url ORDER BY li.position)
+		          FROM listing_images li
+		          WHERE li.listing_id = l.id AND li.revoked_at IS NULL), l.images) AS images,
 		l.published_at, l.first_seen_at, l.last_seen_at, l.details_fetched_at,
 		l.details_expires_at, l.details_status, count(*) OVER() AS total_count
 FROM listings l
@@ -74,7 +77,10 @@ SELECT l.id, ds.name, l.external_id, l.url, l.title, l.description,
 		l.bedrooms, l.bathrooms, l.parking_spots, l.country, l.country_code, l.department,
 		l.city, l.neighborhood, l.address, l.latitude, l.longitude,
 		l.resolved_latitude, l.resolved_longitude, l.location_precision,
-		l.geocode_provider, l.geocoded_at, l.images,
+		l.geocode_provider, l.geocoded_at,
+		COALESCE((SELECT jsonb_agg(li.original_url ORDER BY li.position)
+		          FROM listing_images li
+		          WHERE li.listing_id = l.id AND li.revoked_at IS NULL), l.images) AS images,
 		l.published_at, l.first_seen_at, l.last_seen_at, l.details_fetched_at,
 		l.details_expires_at, l.details_status, 1::bigint
 FROM listings l

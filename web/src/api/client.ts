@@ -9,10 +9,18 @@ export interface SourceRefreshRequest {
 }
 
 export interface SourceRefreshResponse {
-  status: 'SKIPPED' | 'QUEUED' | 'RUNNING' | 'COOLDOWN' | 'UNSUPPORTED' | 'DONE' | 'FAILED'
+  status: 'SKIPPED' | 'QUEUED' | 'RUNNING' | 'COOLDOWN' | 'UNSUPPORTED' | 'PARTIAL' | 'DONE' | 'FAILED'
   refresh_id?: string
   retry_after_seconds?: number
   error?: string
+}
+
+export interface GeoResolution {
+  country_code: string
+  department?: string
+  municipality?: string
+  resolution: 'ADMINISTRATIVE_POLYGON' | 'UNKNOWN' | string
+  available_sources?: string[]
 }
 
 const apiRoot = '/api/v1'
@@ -66,6 +74,11 @@ export function requestSourceRefresh(payload: SourceRefreshRequest, signal?: Abo
 
 export function getSourceRefresh(id: string, signal?: AbortSignal): Promise<SourceRefreshResponse> {
   return request<SourceRefreshResponse>(`/source-refresh/${encodeURIComponent(id)}`, { signal })
+}
+
+export function resolveGeo(longitude: number, latitude: number, signal?: AbortSignal): Promise<GeoResolution> {
+  const params = new URLSearchParams({ longitude: String(longitude), latitude: String(latitude) })
+  return request<GeoResolution>(`/geo/resolve?${params.toString()}`, { signal })
 }
 
 export function resolveImageUrl(value: string): string {

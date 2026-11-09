@@ -1,0 +1,11 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {"type":"Feature","properties":{"country_code":"CO","department":"Cundinamarca","municipality":"Bogotá D.C."},"geometry":{"type":"Polygon","coordinates":[[[-74.35,4.45],[-74.35,4.90],[-73.95,4.90],[-73.95,4.45],[-74.35,4.45]]]}},
+    {"type":"Feature","properties":{"country_code":"CO","department":"Valle del Cauca","municipality":"Cali"},"geometry":{"type":"Polygon","coordinates":[[[-76.65,3.25],[-76.65,3.65],[-76.35,3.65],[-76.35,3.25],[-76.65,3.25]]]}},
+    {"type":"Feature","properties":{"country_code":"CO","department":"Antioquia","municipality":"Medellín"},"geometry":{"type":"Polygon","coordinates":[[[-75.75,6.05],[-75.75,6.45],[-75.52,6.45],[-75.52,6.05],[-75.75,6.05]]]}},
+    {"type":"Feature","properties":{"country_code":"CO","department":"Antioquia","municipality":"Rionegro"},"geometry":{"type":"Polygon","coordinates":[[[-75.50,5.95],[-75.50,6.30],[-75.20,6.30],[-75.20,5.95],[-75.50,5.95]]]}},
+    {"type":"Feature","properties":{"country_code":"CO","department":"Bolívar","municipality":"Cartagena"},"geometry":{"type":"Polygon","coordinates":[[[-75.65,10.25],[-75.65,10.55],[-75.35,10.55],[-75.35,10.25],[-75.65,10.25]]]}},
+    {"type":"Feature","properties":{"country_code":"CO","department":"Atlántico","municipality":"Barranquilla"},"geometry":{"type":"Polygon","coordinates":[[[-75.00,10.80],[-75.00,11.15],[-74.65,11.15],[-74.65,10.80],[-75.00,10.80]]]}}
+  ]
+}

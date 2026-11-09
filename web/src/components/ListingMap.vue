@@ -19,7 +19,7 @@ setWorkerUrl(workerUrl)
 
 const props = defineProps<{ listings: Listing[]; selectedId: number | null }>()
 type SelectionSource = 'marker-click'
-type ViewportBounds = { minLongitude: number; maxLongitude: number; minLatitude: number; maxLatitude: number }
+type ViewportBounds = { minLongitude: number; maxLongitude: number; minLatitude: number; maxLatitude: number; zoom: number }
 const emit = defineEmits<{ select: [listing: Listing, source: SelectionSource]; 'viewport-change': [bounds: ViewportBounds] }>()
 const mapElement = ref<HTMLElement | null>(null)
 let map: Map | null = null
@@ -29,7 +29,6 @@ let resizeObserver: ResizeObserver | null = null
 let popup: Popup | null = null
 let popupHideTimer: ReturnType<typeof setTimeout> | null = null
 let popupHoverBound = false
-let userCameraChange = false
 let programmaticCameraChange = false
 const markers = new globalThis.Map<number, Marker>()
 
@@ -146,21 +145,26 @@ function renderMarkers() {
 
 function fitToListings() {
   if (!map) return
-  programmaticCameraChange = true
   const available = mappedListings()
   if (available.length === 0) {
     const center = props.listings[0]?.country_code === 'UY' ? URUGUAY_CENTER : COLOMBIA_CENTER
+    programmaticCameraChange = true
     map.flyTo({ center, zoom: 5, duration: 500 })
     return
   }
   const firstCoordinate = getValidCoordinates(available[0])
   if (!firstCoordinate) return
-  if (available.length === 1) { map.flyTo({ center: firstCoordinate, zoom: 12, duration: 500 }); return }
+  if (available.length === 1) {
+    programmaticCameraChange = true
+    map.flyTo({ center: firstCoordinate, zoom: 12, duration: 500 })
+    return
+  }
   const bounds = new LngLatBounds()
   available.forEach((listing) => {
     const coordinate = getValidCoordinates(listing)
     if (coordinate) bounds.extend(coordinate)
   })
+  programmaticCameraChange = true
   map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 500 })
 }
 
@@ -179,24 +183,19 @@ function updateMarkerStates(): void {
   }
 }
 
-function markUserCameraChange(): void {
-  userCameraChange = true
-}
-
 function emitUserViewport(): void {
   if (programmaticCameraChange) {
     programmaticCameraChange = false
-    userCameraChange = false
     return
   }
-  if (!map || !userCameraChange) return
-  userCameraChange = false
+  if (!map) return
   const bounds = map.getBounds()
   emit('viewport-change', {
     minLongitude: bounds.getWest(),
     maxLongitude: bounds.getEast(),
     minLatitude: bounds.getSouth(),
     maxLatitude: bounds.getNorth(),
+    zoom: map.getZoom(),
   })
 }
 
@@ -215,9 +214,6 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => map?.resize())
   resizeObserver.observe(mapElement.value)
   map.addControl(new NavigationControl({ showCompass: false }), 'top-right')
-  map.on('dragstart', markUserCameraChange)
-  map.on('zoomstart', markUserCameraChange)
-  map.on('rotatestart', markUserCameraChange)
   map.on('moveend', emitUserViewport)
   map.on('load', () => {
     mapReady = true
@@ -245,7 +241,6 @@ onBeforeUnmount(() => {
   popupHoverBound = false
   resizeObserver?.disconnect()
   resizeObserver = null
-  userCameraChange = false
   programmaticCameraChange = false
   map?.remove()
   map = null

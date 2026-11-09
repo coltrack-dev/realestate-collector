@@ -5,7 +5,7 @@ import ListingCard from './components/ListingCard.vue'
 import ListingMap from './components/ListingMap.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
 import SiteHeader from './components/SiteHeader.vue'
-import { fetchListings, fetchStats, getSourceRefresh, requestSourceRefresh } from './api/client'
+import { fetchListings, fetchStats, getSourceRefresh, requestSourceRefresh, resolveGeo, type GeoResolution } from './api/client'
 import type { Listing, ListingFilters, Stats } from './types'
 import { getValidCoordinates } from './map/coordinates'
 import { expandBounds, geoCacheKey, GeoResultsCache, type GeoBounds } from './map/geoCache'
@@ -25,6 +25,7 @@ const mobileView = ref<'list' | 'map'>('list')
 const activeTab = ref<'properties' | 'map' | 'stats'>('properties')
 const mapListOpen = ref(true)
 const mapViewport = ref<GeoBounds | null>(null)
+let mapViewportZoom = 12
 const viewportLoading = ref(false)
 const viewportError = ref('')
 const viewportHasLoaded = ref(false)
@@ -35,7 +36,10 @@ let mapRequestSequence = 0
 let mapDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let sourceRefreshSequence = 0
 const geoCache = new GeoResultsCache()
+const geoResolutionCache = new Map<string, { value: GeoResolution; expiresAt: number }>()
+const geoResolutionRequests = new Map<string, Promise<GeoResolution>>()
 const mapDraft = reactive({ country_code: '', operation: '', property_type: '', city: '', min_price: '', max_price: '' })
+
 
 const selected = computed(() => catalogListings.value.find((listing) => listing.id === selectedListingId.value)
   ?? viewportListings.value.find((listing) => listing.id === selectedListingId.value)
@@ -69,7 +73,15 @@ async function loadListings(nextFilters = filters.value) {
   } finally { if (listingsController === controller) loading.value = false }
 }
 
-async function loadStats() { try { stats.value = await fetchStats() } catch { /* Catalog remains useful when stats are unavailable. */ } }
+async function loadStats(): Promise<Stats | null> {
+  try {
+    stats.value = await fetchStats()
+    logMapRefresh('stats_reloaded', { total: stats.value.total })
+    return stats.value
+  } catch {
+    return null
+  }
+}
 function applyFilters(next: ListingFilters) {
   viewportError.value = ''
   void loadListings(next)
@@ -118,6 +130,14 @@ function applyMapFilters() {
   else void loadListings(next)
 }
 
+function logMapRefresh(event: 'map_moveend' | 'map_viewport_resolved' | 'map_refresh_considered' | 'map_refresh_skipped' | 'map_refresh_post_started' | 'map_refresh_post_completed' | 'stats_reloaded', details: Record<string, unknown>): void {
+  if (import.meta.env.DEV) {
+    console.debug(event, details)
+    const diagnostics = ((window as typeof window & { __mapRefreshDiagnostics?: unknown[] }).__mapRefreshDiagnostics ??= [])
+    diagnostics.push({ event, details })
+  }
+}
+
 function filterListingsToViewport(values: Listing[], bounds: GeoBounds): Listing[] {
   return values.filter((listing) => {
     const coordinate = getValidCoordinates(listing)
@@ -125,6 +145,28 @@ function filterListingsToViewport(values: Listing[], bounds: GeoBounds): Listing
       && coordinate[0] >= bounds.minLongitude && coordinate[0] <= bounds.maxLongitude
       && coordinate[1] >= bounds.minLatitude && coordinate[1] <= bounds.maxLatitude
   })
+}
+
+function geoResolutionKey(bounds: GeoBounds): string {
+  const longitude = ((bounds.minLongitude + bounds.maxLongitude) / 2).toFixed(2)
+  const latitude = ((bounds.minLatitude + bounds.maxLatitude) / 2).toFixed(2)
+  return `${longitude}:${latitude}`
+}
+
+async function resolveViewport(bounds: GeoBounds, signal?: AbortSignal): Promise<GeoResolution> {
+  const key = geoResolutionKey(bounds)
+  const cached = geoResolutionCache.get(key)
+  if (cached && cached.expiresAt > Date.now()) return cached.value
+  const pending = geoResolutionRequests.get(key)
+  if (pending) return pending
+  const request = resolveGeo((bounds.minLongitude + bounds.maxLongitude) / 2, (bounds.minLatitude + bounds.maxLatitude) / 2, signal)
+    .then((value) => {
+      geoResolutionCache.set(key, { value, expiresAt: Date.now() + 120_000 })
+      return value
+    })
+    .finally(() => geoResolutionRequests.delete(key))
+  geoResolutionRequests.set(key, request)
+  return request
 }
 
 function preserveSelection(values: Listing[]): void {
@@ -144,21 +186,53 @@ function scheduleMapSearch(bounds: GeoBounds): void {
   }, 350)
 }
 
-async function refreshSources(bounds: GeoBounds, requestSequence: number, cacheKey: string): Promise<void> {
-  const countryCode = filters.value.country_code
-  if (countryCode !== 'CO' && countryCode !== 'UY') return
+async function refreshSources(bounds: GeoBounds, requestSequence: number, cacheKey: string, zoom: number): Promise<void> {
+  if (zoom < 9) {
+    logMapRefresh('map_refresh_skipped', { reason: 'zoom_too_low', zoom, bounds })
+    return
+  }
+  let resolution: GeoResolution
+  try {
+    resolution = await resolveViewport(bounds)
+  } catch (caught) {
+    logMapRefresh('map_refresh_skipped', { reason: 'geo_resolver_error', error: caught instanceof Error ? caught.message : 'request_failed' })
+    return
+  }
+  const countryCode = filters.value.country_code || resolution.country_code
+  const city = resolution.municipality
+  logMapRefresh('map_viewport_resolved', { country_code: resolution.country_code, department: resolution.department ?? null, city: city ?? null, resolution: resolution.resolution, zoom, bounds })
+  logMapRefresh('map_refresh_considered', { country_code: countryCode, city: city ?? null, bounds })
+  if (resolution.resolution === 'UNKNOWN' || !city || !resolution.country_code) {
+    logMapRefresh('map_refresh_skipped', { reason: 'geography_unknown' })
+    return
+  }
+  if (filters.value.country_code && filters.value.country_code !== resolution.country_code) {
+    logMapRefresh('map_refresh_skipped', { reason: 'country_filter_mismatch', requested: filters.value.country_code, resolved: resolution.country_code })
+    return
+  }
+  if (resolution.available_sources && resolution.available_sources.length === 0) {
+    sourceRefreshStatus.value = 'No hay fuentes conectadas para esta ciudad.'
+    logMapRefresh('map_refresh_skipped', { reason: 'no_connected_sources', country_code: resolution.country_code, city })
+    return
+  }
   const refreshSequence = ++sourceRefreshSequence
   try {
+		sourceRefreshStatus.value = 'Buscando nuevas propiedades…'
+		logMapRefresh('map_refresh_post_started', { country_code: countryCode, city, operation: filters.value.operation || 'ALL', property_type: filters.value.property_type || 'ALL', bounds })
     const result = await requestSourceRefresh({
       country_code: countryCode,
-      city: filters.value.city || undefined,
-      operation: filters.value.operation || undefined,
-      property_type: filters.value.property_type || undefined,
+      city,
+			operation: filters.value.operation,
+			property_type: filters.value.property_type,
       bbox: { min_longitude: bounds.minLongitude, max_longitude: bounds.maxLongitude, min_latitude: bounds.minLatitude, max_latitude: bounds.maxLatitude },
     })
+    logMapRefresh('map_refresh_post_completed', { status: result.status, refresh_id: result.refresh_id ?? null, city })
     if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
-    if (!result.refresh_id || result.status === 'SKIPPED' || result.status === 'UNSUPPORTED' || result.status === 'COOLDOWN') return
-    sourceRefreshStatus.value = 'Buscando nuevas propiedades…'
+    if (!result.refresh_id || result.status === 'SKIPPED' || result.status === 'UNSUPPORTED' || result.status === 'COOLDOWN') {
+			sourceRefreshStatus.value = result.status === 'UNSUPPORTED' ? 'Actualización limitada: la fuente no admite esta combinación.' : result.status === 'COOLDOWN' ? 'Actualización limitada temporalmente; inténtalo de nuevo en unos segundos.' : 'No se encontraron nuevas propiedades.'
+			logMapRefresh('map_refresh_skipped', { reason: `server_${result.status.toLowerCase()}`, city })
+      return
+    }
     for (let attempt = 0; attempt < 45; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 1000))
       if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
@@ -166,20 +240,35 @@ async function refreshSources(bounds: GeoBounds, requestSequence: number, cacheK
       if (refreshSequence !== sourceRefreshSequence || requestSequence !== mapRequestSequence) return
       if (status.status === 'DONE') {
         geoCache.delete(cacheKey)
-        sourceRefreshStatus.value = ''
+        const previousTotal = stats.value?.total ?? null
+        const refreshedStats = await loadStats()
+        sourceRefreshStatus.value = refreshedStats && previousTotal !== null && refreshedStats.total > previousTotal
+          ? 'Nuevas propiedades encontradas.'
+          : 'No se encontraron nuevas propiedades.'
+        await loadMapArea(bounds, true)
+        return
+      }
+      if (status.status === 'PARTIAL') {
+        geoCache.delete(cacheKey)
+        sourceRefreshStatus.value = 'Fuente comprobada; algunos resultados fueron parciales.'
+        await loadStats()
         await loadMapArea(bounds, true)
         return
       }
       if (status.status === 'FAILED') { sourceRefreshStatus.value = ''; return }
     }
     sourceRefreshStatus.value = ''
-  } catch { if (refreshSequence === sourceRefreshSequence) sourceRefreshStatus.value = '' }
+  } catch (caught) {
+    logMapRefresh('map_refresh_post_completed', { status: 'ERROR', reason: caught instanceof Error ? caught.message : 'request_failed', city })
+    if (refreshSequence === sourceRefreshSequence) sourceRefreshStatus.value = ''
+  }
 }
 
-async function loadMapArea(bounds: GeoBounds, forceDatabase = false): Promise<void> {
+async function loadMapArea(bounds: GeoBounds, forceDatabase = false, zoom = mapViewportZoom): Promise<void> {
   const expanded = expandBounds(bounds)
   const requestFilters: ListingFilters = {
     ...filters.value,
+    city: '',
     min_longitude: String(expanded.minLongitude),
     max_longitude: String(expanded.maxLongitude),
     min_latitude: String(expanded.minLatitude),
@@ -195,6 +284,7 @@ async function loadMapArea(bounds: GeoBounds, forceDatabase = false): Promise<vo
     viewportHasLoaded.value = true
     viewportLoading.value = false
     viewportError.value = ''
+    if (activeTab.value === 'map') void refreshSources(bounds, mapRequestSequence, key, zoom)
     return
   }
 
@@ -211,7 +301,7 @@ async function loadMapArea(bounds: GeoBounds, forceDatabase = false): Promise<vo
     viewportListings.value = filterListingsToViewport(response.data, bounds)
     preserveSelection(viewportListings.value)
     viewportHasLoaded.value = true
-    if (!forceDatabase && activeTab.value === 'map') void refreshSources(bounds, requestSequence, key)
+    if (!forceDatabase && activeTab.value === 'map') void refreshSources(bounds, requestSequence, key, zoom)
   } catch (caught) {
     if (requestSequence !== mapRequestSequence || (caught instanceof DOMException && caught.name === 'AbortError')) return
     viewportError.value = caught instanceof Error ? caught.message : 'No se pudo actualizar esta zona'
@@ -220,8 +310,10 @@ async function loadMapArea(bounds: GeoBounds, forceDatabase = false): Promise<vo
   }
 }
 
-function handleViewportChange(bounds: GeoBounds) {
-  scheduleMapSearch(bounds)
+function handleViewportChange(viewport: GeoBounds & { zoom: number }) {
+  mapViewportZoom = viewport.zoom
+  logMapRefresh('map_moveend', { bounds: viewport, zoom: viewport.zoom })
+  scheduleMapSearch(viewport)
 }
 
 onMounted(() => { syncMapDraft(); void loadListings(); void loadStats() })

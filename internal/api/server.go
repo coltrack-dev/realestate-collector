@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/example/realestate-collector/internal/geo"
 	"github.com/example/realestate-collector/internal/model"
 	"github.com/example/realestate-collector/internal/refresh"
 )
@@ -67,23 +70,27 @@ type Server struct {
 	Repository Repository
 	Details    *DetailsService
 	Refresh    *refresh.Coordinator
+	Geo        geo.Resolver
 }
 
 func NewServer(repository Repository, details ...*DetailsService) http.Handler {
-	server := &Server{Repository: repository}
+	var detail *DetailsService
 	if len(details) > 0 {
-		server.Details = details[0]
+		detail = details[0]
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", server.health)
-	mux.HandleFunc("/api/v1/listings", server.listings)
-	mux.HandleFunc("/api/v1/listings/", server.listingByID)
-	mux.HandleFunc("/api/v1/stats", server.stats)
-	return loggingMiddleware(mux)
+	return newServer(repository, detail, nil, nil)
 }
 
 func NewServerWithRefresh(repository Repository, details *DetailsService, coordinator *refresh.Coordinator) http.Handler {
-	server := &Server{Repository: repository, Details: details, Refresh: coordinator}
+	return newServer(repository, details, coordinator, nil)
+}
+
+func NewServerWithGeo(repository Repository, details *DetailsService, coordinator *refresh.Coordinator, resolver geo.Resolver) http.Handler {
+	return newServer(repository, details, coordinator, resolver)
+}
+
+func newServer(repository Repository, details *DetailsService, coordinator *refresh.Coordinator, resolver geo.Resolver) http.Handler {
+	server := &Server{Repository: repository, Details: details, Refresh: coordinator, Geo: resolver}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", server.health)
 	mux.HandleFunc("/api/v1/listings", server.listings)
@@ -91,44 +98,160 @@ func NewServerWithRefresh(repository Repository, details *DetailsService, coordi
 	mux.HandleFunc("/api/v1/stats", server.stats)
 	mux.HandleFunc("/api/v1/source-refresh", server.sourceRefresh)
 	mux.HandleFunc("/api/v1/source-refresh/", server.sourceRefreshByID)
+	mux.HandleFunc("/api/v1/geo/resolve", server.resolveGeo)
 	return loggingMiddleware(mux)
+}
+
+func (s *Server) resolveGeo(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer)
+		return
+	}
+	if s.Geo == nil {
+		writeJSON(writer, http.StatusOK, geo.Result{Resolution: geo.Unknown})
+		return
+	}
+	longitude, err := strconv.ParseFloat(request.URL.Query().Get("longitude"), 64)
+	if err != nil || math.IsNaN(longitude) || math.IsInf(longitude, 0) || longitude < -180 || longitude > 180 {
+		writeError(writer, http.StatusBadRequest, "longitude is invalid")
+		return
+	}
+	latitude, err := strconv.ParseFloat(request.URL.Query().Get("latitude"), 64)
+	if err != nil || math.IsNaN(latitude) || math.IsInf(latitude, 0) || latitude < -90 || latitude > 90 {
+		writeError(writer, http.StatusBadRequest, "latitude is invalid")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), RequestTimeout)
+	defer cancel()
+	result, err := s.Geo.Resolve(ctx, geo.Point{Longitude: longitude, Latitude: latitude})
+	if err != nil {
+		slog.Warn("geo_resolve_failed", "error", err)
+		writeError(writer, http.StatusInternalServerError, "geographic resolution failed")
+		return
+	}
+	if s.Refresh != nil && result.CountryCode != "" {
+		result.AvailableSources = s.Refresh.AvailableSources(result.CountryCode, result.Municipality)
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 
 type sourceRefreshRequest struct {
 	CountryCode  string         `json:"country_code"`
 	City         string         `json:"city"`
+	Department   string         `json:"department"`
 	Bounds       refresh.Bounds `json:"bbox"`
 	Operation    string         `json:"operation"`
 	PropertyType string         `json:"property_type"`
 }
 
 func (s *Server) sourceRefresh(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost { methodNotAllowed(writer); return }
-	if s.Refresh == nil { writeJSON(writer, http.StatusNotImplemented, refresh.Result{Status: refresh.StatusUnsupported}); return }
+	if request.Method != http.MethodPost {
+		methodNotAllowed(writer)
+		return
+	}
+	if s.Refresh == nil {
+		slog.Warn("source_refresh_rejected", "reason", "coordinator_not_configured")
+		writeJSON(writer, http.StatusNotImplemented, refresh.Result{Status: refresh.StatusUnsupported})
+		return
+	}
+	if !s.Refresh.Enabled() {
+		slog.Warn("source_refresh_rejected", "reason", "refresh_disabled")
+		writeJSON(writer, http.StatusForbidden, refresh.Result{Status: refresh.StatusUnsupported})
+		return
+	}
 	var payload sourceRefreshRequest
 	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 16<<10)).Decode(&payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid refresh request")
 		return
 	}
-	if payload.CountryCode == "" || !payload.Bounds.Valid() {
-		writeError(writer, http.StatusBadRequest, "country_code and valid bbox are required")
+	if err := validateSourceRefresh(payload); err != nil {
+		slog.Warn("source_refresh_rejected", "reason", err.Error())
+		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
 	clientKey := request.RemoteAddr
-	if host, _, err := net.SplitHostPort(clientKey); err == nil { clientKey = host }
-	result := s.Refresh.Request(refresh.Request{CountryCode: payload.CountryCode, City: payload.City, Bounds: payload.Bounds, Operation: payload.Operation, PropertyType: payload.PropertyType}, clientKey)
+	if host, _, err := net.SplitHostPort(clientKey); err == nil {
+		clientKey = host
+	}
+	slog.Info("source_refresh_requested", "country_code", payload.CountryCode, "city", payload.City, "department", payload.Department, "operation", payload.Operation, "property_type", payload.PropertyType)
+	result := s.Refresh.Request(refresh.Request{CountryCode: payload.CountryCode, City: payload.City, Department: payload.Department, Bounds: payload.Bounds, Operation: payload.Operation, PropertyType: payload.PropertyType}, clientKey)
+	if result.Status == refresh.StatusUnsupported || result.Status == refresh.StatusSkipped || result.Status == refresh.StatusCooldown {
+		slog.Debug("source_refresh_rejected", "reason", strings.ToLower(string(result.Status)), "country_code", payload.CountryCode, "city", payload.City)
+	}
 	status := http.StatusOK
-	if result.Status == refresh.StatusQueued { status = http.StatusAccepted }
+	if result.Status == refresh.StatusQueued {
+		status = http.StatusAccepted
+	}
 	writeJSON(writer, status, result)
 }
 
 func (s *Server) sourceRefreshByID(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet { methodNotAllowed(writer); return }
-	if s.Refresh == nil { writeError(writer, http.StatusNotFound, "refresh not found"); return }
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer)
+		return
+	}
+	if s.Refresh == nil {
+		writeError(writer, http.StatusNotFound, "refresh not found")
+		return
+	}
 	id := strings.TrimPrefix(request.URL.Path, "/api/v1/source-refresh/")
-	status, ok := s.Refresh.Get(strings.Trim(id, "/"))
-	if !ok { writeError(writer, http.StatusNotFound, "refresh not found"); return }
-	writeJSON(writer, http.StatusOK, status)
+	jobStatus, ok := s.Refresh.Get(strings.Trim(id, "/"))
+	if !ok {
+		writeError(writer, http.StatusNotFound, "refresh not found")
+		return
+	}
+	public := map[string]any{"status": jobStatus.Status}
+	if jobStatus.RefreshID != "" {
+		public["refresh_id"] = jobStatus.RefreshID
+	}
+	if jobStatus.RetryAfterSeconds > 0 {
+		public["retry_after_seconds"] = jobStatus.RetryAfterSeconds
+	}
+	if len(jobStatus.SourceStatuses) > 0 {
+		public["source_statuses"] = jobStatus.SourceStatuses
+	}
+	public["listings_fetched"] = jobStatus.ListingsFetched
+	public["listings_inserted"] = jobStatus.ListingsInserted
+	public["listings_updated"] = jobStatus.ListingsUpdated
+	public["listings_unchanged"] = jobStatus.ListingsUnchanged
+	public["listings_rejected"] = jobStatus.ListingsRejected
+	if jobStatus.Error != "" {
+		public["error"] = "refresh failed; see server logs"
+	}
+	writeJSON(writer, http.StatusOK, public)
+}
+
+func validateSourceRefresh(payload sourceRefreshRequest) error {
+	if payload.CountryCode != "CO" && payload.CountryCode != "UY" {
+		return errors.New("country_code must be CO or UY")
+	}
+	if strings.TrimSpace(payload.City) == "" || len([]rune(payload.City)) > 100 {
+		return errors.New("city is required and must be at most 100 characters")
+	}
+	if len([]rune(payload.Department)) > 100 {
+		return errors.New("department must be at most 100 characters")
+	}
+	if payload.Operation != "" && payload.Operation != "SALE" && payload.Operation != "RENT" {
+		return errors.New("operation must be SALE, RENT, or empty for ALL")
+	}
+	if payload.PropertyType != "" {
+		switch payload.PropertyType {
+		case "APARTMENT", "HOUSE", "LAND", "COMMERCIAL":
+		default:
+			return errors.New("property_type is not supported or empty for ALL")
+		}
+	}
+	b := payload.Bounds
+	if !b.Valid() || math.IsNaN(b.MinLongitude) || math.IsNaN(b.MaxLongitude) || math.IsNaN(b.MinLatitude) || math.IsNaN(b.MaxLatitude) || math.IsInf(b.MinLongitude, 0) || math.IsInf(b.MaxLongitude, 0) || math.IsInf(b.MinLatitude, 0) || math.IsInf(b.MaxLatitude, 0) {
+		return errors.New("bbox coordinates are invalid")
+	}
+	if b.MinLongitude < -180 || b.MaxLongitude > 180 || b.MinLatitude < -90 || b.MaxLatitude > 90 {
+		return errors.New("bbox coordinates are out of range")
+	}
+	if b.MaxLongitude-b.MinLongitude > 15 || b.MaxLatitude-b.MinLatitude > 15 {
+		return errors.New("bbox is too large")
+	}
+	return nil
 }
 
 func (s *Server) health(writer http.ResponseWriter, request *http.Request) {
